@@ -1,0 +1,4 @@
+/target
+/scrape.db
+/scrape.db-*
+.env

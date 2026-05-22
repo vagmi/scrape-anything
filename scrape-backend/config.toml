@@ -1,0 +1,24 @@
+[server]
+host = "127.0.0.1"
+port = 4546
+
+[storage]
+path = "./scrape.db"
+
+[llm]
+provider = "gemini"
+model = "gemini-3-flash"
+# GEMINI_API_KEY is read from the environment, not this file.
+max_turns = 50
+max_refinements = 3
+request_timeout_secs = 60
+
+[cors]
+allowed_origins = ["chrome-extension://*"]
+
+# Per-host route normalization overrides (see SPEC §9).
+[[routes]]
+host = "lu.ma"
+patterns = [
+  { match = "^/[^/]+$", replace = "/:slug" },
+]

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["count", "samples"],
+  "additionalProperties": false,
+  "properties": {
+    "count": { "type": "integer", "minimum": 0 },
+    "samples": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "outer_html":    { "type": "string" },
+          "text":          { "type": "string" },
+          "children_tags": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

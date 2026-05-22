@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["items_count", "field_completeness", "first_items", "errors"],
+  "additionalProperties": false,
+  "properties": {
+    "items_count": { "type": "integer", "minimum": 0 },
+    "field_completeness": {
+      "type": "object",
+      "additionalProperties": { "type": "number", "minimum": 0, "maximum": 1 }
+    },
+    "first_items": { "type": "array", "items": {} },
+    "errors":      { "type": "array", "items": { "type": "string" } }
+  }
+}

@@ -1,0 +1,44 @@
+[package]
+name = "scrape-backend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Web
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Async
+tokio = { version = "1.49", features = ["full"] }
+futures = "0.3"
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Storage
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "migrate", "chrono", "macros"] }
+
+# LLM (matches urai-chat fork)
+genai = { git = "https://github.com/vagmi/rust-genai", branch = "disable-thinking" }
+
+# Config / env
+toml = "0.8"
+
+# IDs / time / hashing
+ulid = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+
+# Validation
+jsonschema = { version = "0.30", default-features = false }
+
+# Errors
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

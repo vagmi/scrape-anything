@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Luma Scraper",
+  "version": "0.1.0",
+  "description": "Scrape event details and event listings from lu.ma pages. Download results as JSON or CSV.",
+  "permissions": ["activeTab", "scripting", "downloads"],
+  "host_permissions": ["https://lu.ma/*"],
+  "action": {
+    "default_title": "Luma Scraper",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

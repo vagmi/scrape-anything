@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Luma Scraper</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Luma Scraper</h1>
+      <p id="page-kind" class="muted">Detecting page…</p>
+    </header>
+
+    <section class="actions">
+      <button id="scrape" class="primary">Scrape this page</button>
+      <div class="row">
+        <button id="download-json" disabled>Download JSON</button>
+        <button id="download-csv" disabled>Download CSV</button>
+      </div>
+    </section>
+
+    <section id="preview" class="preview hidden">
+      <div class="preview-header">
+        <strong id="preview-count">0 items</strong>
+        <button id="copy" class="link">Copy JSON</button>
+      </div>
+      <pre id="preview-body"></pre>
+    </section>
+
+    <p id="status" class="muted"></p>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["source", "path"],
+  "additionalProperties": false,
+  "properties": {
+    "source": { "enum": ["next_data", "json_ld"] },
+    "path":   { "type": "string", "minLength": 1 }
+  }
+}

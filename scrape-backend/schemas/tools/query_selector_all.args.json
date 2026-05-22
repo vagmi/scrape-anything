@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["selector"],
+  "additionalProperties": false,
+  "properties": {
+    "selector":     { "type": "string", "minLength": 1 },
+    "limit":        { "type": "integer", "minimum": 1, "maximum": 20, "default": 5 },
+    "include_html": { "type": "boolean", "default": true }
+  }
+}
