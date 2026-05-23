@@ -2238,6 +2238,7 @@ dependencies = [
  "genai",
  "hex",
  "jsonschema",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

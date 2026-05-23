@@ -34,6 +34,7 @@ hex = "0.4"
 
 # Validation
 jsonschema = { version = "0.30", default-features = false }
+regex = "1"
 
 # Errors
 anyhow = "1"

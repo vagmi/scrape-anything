@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ScrapeTurnEnvelope",
+  "description": "Exactly one of: tool_call (with per-tool required args), clarify, plan, give_up.",
+  "anyOf": [
+    {
+      "type": "object",
+      "required": ["kind", "tool", "args", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":      { "const": "tool_call" },
+        "tool":      { "const": "query_selector_all" },
+        "rationale": { "type": "string", "minLength": 1 },
+        "args": {
+          "type": "object",
+          "required": ["selector"],
+          "additionalProperties": false,
+          "properties": {
+            "selector":     { "type": "string", "minLength": 1 },
+            "limit":        { "type": "integer", "minimum": 1, "maximum": 20 },
+            "include_html": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": ["kind", "tool", "args", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":      { "const": "tool_call" },
+        "tool":      { "const": "read_json_path" },
+        "rationale": { "type": "string", "minLength": 1 },
+        "args": {
+          "type": "object",
+          "required": ["source", "path"],
+          "additionalProperties": false,
+          "properties": {
+            "source": { "enum": ["next_data", "json_ld"] },
+            "path":   { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": ["kind", "tool", "args", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":      { "const": "tool_call" },
+        "tool":      { "const": "list_attributes" },
+        "rationale": { "type": "string", "minLength": 1 },
+        "args": {
+          "type": "object",
+          "required": ["selector"],
+          "additionalProperties": false,
+          "properties": {
+            "selector": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": ["kind", "tool", "args", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":      { "const": "tool_call" },
+        "tool":      { "const": "probe_plan" },
+        "rationale": { "type": "string", "minLength": 1 },
+        "args": {
+          "type": "object",
+          "required": ["plan"],
+          "additionalProperties": false,
+          "properties": { "plan": { "type": "object" } }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": ["kind", "question"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":      { "const": "clarify" },
+        "question":  { "type": "string", "minLength": 1 },
+        "options":   { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    {
+      "type": "object",
+      "required": ["kind", "plan", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":      { "const": "plan" },
+        "rationale": { "type": "string", "minLength": 1 },
+        "plan":      { "type": "object" }
+      }
+    },
+    {
+      "type": "object",
+      "required": ["kind", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":   { "const": "give_up" },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    }
+  ]
+}

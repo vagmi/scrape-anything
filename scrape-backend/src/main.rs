@@ -1,3 +1,4 @@
+mod agent;
 mod config;
 mod db;
 mod dsl;
@@ -16,7 +17,7 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("scrape_backend=info,tower_http=info,axum=info")))
+            .unwrap_or_else(|_| EnvFilter::new("scrape_backend=debug,tower_http=info,axum=info")))
         .init();
 
     let config_path = std::env::var("SCRAPE_BACKEND_CONFIG")

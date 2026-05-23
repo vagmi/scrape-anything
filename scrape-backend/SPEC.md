@@ -8,7 +8,7 @@ written.
 
 The extension produces a *structural fingerprint* of the current page plus a
 user-supplied **intention** ("get all events with title, url, date"). The
-backend, using an LLM (Gemini `gemini-3-flash` via `genai`), works through an
+backend, using an LLM (Gemini `gemini-3-flash-preview` via `genai`), works through an
 **agentic loop**: it can call back into the extension to probe the page, and
 eventually emits a **Plan** in a fixed DSL. The extension's interpreter
 executes the plan against the live DOM and downloads the result.
@@ -488,7 +488,7 @@ path = "./scrape.db"
 
 [llm]
 provider = "gemini"          # direct Gemini API; reads GEMINI_API_KEY from env
-model = "gemini-3-flash"
+model = "gemini-3-flash-preview"
 max_turns = 50               # hard cap on the agentic tool-call loop
 max_refinements = 3
 

@@ -11,24 +11,35 @@
       <p id="page-kind" class="muted">Detecting page…</p>
     </header>
 
-    <section class="actions">
-      <button id="scrape" class="primary">Scrape this page</button>
+    <section class="intention">
+      <label for="intention">What do you want extracted?</label>
+      <textarea id="intention" rows="3" placeholder="e.g. all upcoming tech events with title, url, and start time"></textarea>
       <div class="row">
-        <button id="download-json" disabled>Download JSON</button>
-        <button id="download-csv" disabled>Download CSV</button>
+        <button id="run" class="primary">Plan &amp; run</button>
       </div>
     </section>
 
-    <section id="preview" class="preview hidden">
+    <section id="rationale" class="rationale hidden"></section>
+
+    <details id="code-wrap" class="code-wrap hidden">
+      <summary>Generated code</summary>
+      <pre id="code-body"></pre>
+    </details>
+
+    <section id="result" class="preview hidden">
       <div class="preview-header">
-        <strong id="preview-count">0 items</strong>
-        <button id="copy" class="link">Copy JSON</button>
+        <strong id="result-count">0 items</strong>
       </div>
-      <pre id="preview-body"></pre>
+      <div class="row">
+        <button id="download-json" disabled>Download JSON</button>
+        <button id="download-csv" disabled>Download CSV</button>
+        <button id="copy" class="link" disabled>Copy</button>
+      </div>
+      <pre id="result-body"></pre>
     </section>
 
     <p id="status" class="muted"></p>
 
-    <script src="popup.js"></script>
+    <script type="module" src="popup.js"></script>
   </body>
 </html>

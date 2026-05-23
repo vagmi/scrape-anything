@@ -1,41 +1,117 @@
-# Luma Scraper (Chrome MV3)
+# scrape-luma
 
-Scrapes event details and event listings from lu.ma pages, then downloads them as JSON or CSV.
+LLM-generated web scraping from a Chrome extension. A Rust backend asks
+Gemini to write a JavaScript function for a given page + intention; the
+extension runs it in the tab via `chrome.userScripts` and returns the
+extracted records. Designed around Luma but works on any page.
 
-## Install (unpacked)
+## Layout
 
-1. Open `chrome://extensions`.
-2. Toggle **Developer mode** (top right).
-3. Click **Load unpacked** and select this folder.
+```
+scrape-luma/
+├── extension/         # Chrome MV3 extension
+└── scrape-backend/    # Rust (axum + sqlx-sqlite + genai) planner service
+```
 
-## Use
+`scrape-backend/SPEC.md` documents the wire protocol and storage schema. Note
+that the spec was written for an earlier agentic / Plan-DSL design; the
+current implementation is a simpler one-shot codegen flow (the schema and
+endpoints are still compatible).
 
-1. Navigate to a lu.ma page:
-   - A single event: `https://lu.ma/<event-slug>` — yields one normalized event record.
-   - A listing/calendar/discover page — yields all event links found in the grid.
-2. Click the extension icon.
-3. Click **Scrape this page**.
-4. Click **Download JSON** or **Download CSV**.
+## Run the backend
 
-## How it works
+```sh
+cd scrape-backend
+GEMINI_API_KEY=… cargo run
+```
 
-`content.js` is injected on demand via `chrome.scripting.executeScript`. It tries three sources in order:
+Listens on `http://localhost:4546` and creates `scrape.db` next to the binary
+on first run. Set `RUST_LOG=scrape_backend=debug` to see the full Gemini I/O
+per turn; `RUST_LOG=scrape_backend=info` for quieter output.
 
-1. **`__NEXT_DATA__`** — Luma is a Next.js app and embeds the full page payload as JSON. Cleanest source when present.
-2. **JSON-LD** (`<script type="application/ld+json">`) — single event pages embed a schema.org `Event` object.
-3. **DOM selectors** — fallback for anchors, titles, images on listing pages.
+## Install the extension
 
-The two sources are merged so the result includes both schema.org fields (e.g. `priceCurrency`) and Luma-specific fields (e.g. `api_id`, `slug`).
+1. Open `chrome://extensions`, enable **Developer mode** (top-right).
+2. **Load unpacked** → select the `extension/` folder.
+3. On the extension's card, turn on **Allow User Scripts**.
+   - This toggle only appears when Developer mode is on and the extension
+     declares the `userScripts` permission. We need it because runtime code
+     evaluation is otherwise blocked by Chrome and by most pages' CSPs.
+4. Open any web page → click the extension → type what you want extracted →
+   click **Plan & run**.
 
-## Files
+## Flow
 
-- `manifest.json` — MV3 manifest, scoped to `https://lu.ma/*`.
-- `popup.html` / `popup.css` / `popup.js` — UI and download logic.
-- `content.js` — page scraping, returns a structured result.
-- `background.js` — empty service worker, reserved for future use.
+```
+[extension]                                            [backend]
+   ├── collect DOM signals (dom-signals.js)
+   ├── POST /api/sessions  ───────────────────────────▶
+   │                                                     ├── Gemini writes a
+   │                                                     │   ```js-action``` block
+   ◀──────────  { kind: "code", code, rationale }  ──────┤
+   ├── chrome.userScripts.execute(code)
+   ├── render items + show generated code
+   ├── POST /api/sessions/:id/result  ────────────────▶ (telemetry / cache)
+   └── download JSON / CSV
+```
 
-## Notes
+The backend persists every session and turn in SQLite. When a session produces
+code, it's cached in the `plans` table keyed by `(host, route_pattern,
+intention_hash)`; future runs against pages on the same route template with
+the same intention can reuse the cached code without another LLM call.
 
-- The extension only requests `activeTab`, `scripting`, and `downloads` permissions, plus `https://lu.ma/*` host access.
-- Listing detection skips multi-segment paths (e.g. `/discover/tech`), which removes most non-event links.
-- CSV output flattens nested values via `JSON.stringify` so they survive a round trip.
+## Code contract
+
+The model emits a single fenced block:
+
+````
+Brief one-line rationale.
+
+```js-action
+const data = JSON.parse(document.getElementById("__NEXT_DATA__").textContent);
+const list = data?.props?.pageProps?.initialData?.data?.entries ?? [];
+const items = list.map((e) => ({
+  title: e.event?.name,
+  url:   e.event?.url && new URL(e.event.url, "https://lu.ma/").href,
+  start: e.event?.start_at,
+}));
+return { kind: "listing", items };
+```
+````
+
+The extension wraps the body in an IIFE and runs it through
+`chrome.userScripts.execute`. The block must end with `return { kind, items }`
+where `kind` is `"listing"` or `"event"` and `items` is an array of plain
+objects.
+
+## Layout details
+
+### `extension/`
+
+- `manifest.json` — MV3, requests `activeTab`, `scripting`, `downloads`,
+  `storage`, `userScripts`, and broad host access.
+- `popup.html` / `popup.css` / `popup.js` — the popup UI; drives the
+  collect-signals → POST → run-code → download cycle.
+- `dom-signals.js` — content script that builds the page fingerprint
+  (`__NEXT_DATA__`, JSON-LD, meta, candidate selectors, samples, DOM
+  skeleton) under a 240 KB budget.
+- `backend.js` — `fetch` wrapper around `http://localhost:4546`.
+- `background.js` — empty MV3 service worker.
+
+### `scrape-backend/`
+
+- `src/main.rs` — config load, sqlite pool, genai client, axum bind.
+- `src/agent.rs` — single-shot Gemini call, parses the `js-action` fence.
+- `src/session.rs` — session lifecycle, persistence, code cache upsert.
+- `src/routes/sessions.rs` / `src/routes/plans.rs` — HTTP endpoints.
+- `src/prompts/system.md` — the system prompt the model sees.
+- `migrations/0001_initial.sql` — `sessions`, `turns`, `plans` tables.
+
+## Safety notes
+
+`chrome.userScripts` runs code in a context **without** the page's CSP. That
+means the LLM-generated code can call `fetch`, read the page DOM, and so on.
+The trust chain is: you → backend → Gemini → code. For local YOLO use this is
+fine. For shared or cloud deployments, sandbox the runner (e.g. via an
+`iframe` with strict CSP) or fall back to a constrained DSL — both paths are
+sketched in `scrape-backend/SPEC.md`.

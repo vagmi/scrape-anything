@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "Luma Scraper",
-  "version": "0.1.0",
-  "description": "Scrape event details and event listings from lu.ma pages. Download results as JSON or CSV.",
-  "permissions": ["activeTab", "scripting", "downloads"],
-  "host_permissions": ["https://lu.ma/*"],
+  "name": "Luma Scraper (agentic)",
+  "version": "0.3.0",
+  "description": "LLM-planned scraping for any web page. Local backend on http://localhost:4546.",
+  "permissions": ["activeTab", "scripting", "downloads", "storage", "userScripts"],
+  "host_permissions": ["http://*/*", "https://*/*"],
   "action": {
-    "default_title": "Luma Scraper",
+    "default_title": "Scrape this page",
     "default_popup": "popup.html"
   },
   "background": {
