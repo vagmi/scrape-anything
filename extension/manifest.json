@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Luma Scraper (agentic)",
+  "name": "Scrape Anything",
   "version": "0.3.0",
-  "description": "LLM-planned scraping for any web page. Local backend on http://localhost:4546.",
+  "description": "LLM-generated scraping for any web page. Local backend on http://localhost:4546.",
   "permissions": ["activeTab", "scripting", "downloads", "storage", "userScripts"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "action": {

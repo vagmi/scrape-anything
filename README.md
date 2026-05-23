@@ -1,14 +1,15 @@
-# scrape-luma
+# scrape-anything
 
 LLM-generated web scraping from a Chrome extension. A Rust backend asks
 Gemini to write a JavaScript function for a given page + intention; the
 extension runs it in the tab via `chrome.userScripts` and returns the
-extracted records. Designed around Luma but works on any page.
+extracted records. Works on any page; the bundled system-prompt example
+uses Luma because its `__NEXT_DATA__` structure is a clean reference.
 
 ## Layout
 
 ```
-scrape-luma/
+scrape-anything/
 ├── extension/         # Chrome MV3 extension
 └── scrape-backend/    # Rust (axum + sqlx-sqlite + genai) planner service
 ```
