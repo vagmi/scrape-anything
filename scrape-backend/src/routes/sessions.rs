@@ -15,9 +15,22 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/sessions", post(create))
         .route("/api/sessions/{id}", get(fetch))
+        .route("/api/sessions/{id}/message", post(message))
         .route("/api/sessions/{id}/tool_result", post(tool_result))
         .route("/api/sessions/{id}/clarify", post(clarify_answer))
         .route("/api/sessions/{id}/result", post(result))
+}
+
+#[derive(Deserialize)]
+pub struct MessageReq { pub content: String }
+
+async fn message(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<MessageReq>,
+) -> AppResult<Json<TurnResp>> {
+    let turn = session::handle_message(&s, &id, req.content).await?;
+    Ok(Json(TurnResp { turn }))
 }
 
 #[derive(Deserialize)]

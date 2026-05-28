@@ -73,7 +73,9 @@ pub async fn record_result(
     session_id: &str,
     payload: Value,
 ) -> AppResult<()> {
-    ensure_active(state.db(), session_id).await?;
+    // record_result fires after a code turn — the session has already been
+    // marked completed by `advance`. We just need it to exist.
+    session_must_exist(state.db(), session_id).await?;
     let idx = next_index(state.db(), session_id).await?;
     let body = payload.to_string();
     let items = payload.get("items_count").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -98,8 +100,38 @@ pub async fn record_result(
     Ok(())
 }
 
-/// Deprecated. The agentic loop with tool calls is gone; the endpoint stays so
-/// old extension builds get a clear 410 instead of a 404.
+/// Append a follow-up user message and run the next agent step. This is the
+/// multi-turn refinement path: the session must exist but doesn't need to be
+/// in `active` status (completed and gave_up sessions can be revived by
+/// continuing the conversation).
+pub async fn handle_message(
+    state: &AppState,
+    session_id: &str,
+    content: String,
+) -> AppResult<Turn> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::BadSignals("message content is empty".into()));
+    }
+    session_must_exist(state.db(), session_id).await?;
+    // Re-open if we previously marked completed/gave_up.
+    mark_status(state.db(), session_id, "active").await?;
+
+    let idx = next_index(state.db(), session_id).await?;
+    let payload = json!({ "content": trimmed }).to_string();
+    tracing::info!(
+        target: "scrape_backend::session",
+        session_id = %session_id,
+        turn_index = idx,
+        content = %truncate_for_log(trimmed, 400),
+        "extension user message received"
+    );
+    insert_turn(state.db(), session_id, idx, "user", "message", &payload).await?;
+    advance(state, session_id).await
+}
+
+/// Deprecated. The old agentic loop with tool calls is gone; the endpoint
+/// stays so old extension builds get a clear 410 instead of a 404.
 pub async fn handle_tool_result(
     _state: &AppState,
     _session_id: &str,
@@ -116,6 +148,15 @@ pub async fn handle_clarify_answer(
     _answer: String,
 ) -> AppResult<Turn> {
     Err(AppError::SessionExpired)
+}
+
+async fn session_must_exist(db: &SqlitePool, session_id: &str) -> AppResult<()> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM sessions WHERE id = ?1")
+            .bind(session_id)
+            .fetch_optional(db)
+            .await?;
+    if row.is_none() { Err(AppError::SessionNotFound) } else { Ok(()) }
 }
 
 pub async fn fetch_full(state: &AppState, session_id: &str) -> AppResult<Value> {
@@ -280,19 +321,6 @@ fn normalize_route(host: &str, route: &str, host_rules: &[crate::config::HostRou
 }
 
 // ─────────────────────────── small DB helpers ───────────────────────────────
-
-async fn ensure_active(db: &SqlitePool, session_id: &str) -> AppResult<()> {
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT status FROM sessions WHERE id = ?1")
-            .bind(session_id)
-            .fetch_optional(db)
-            .await?;
-    match row {
-        None => Err(AppError::SessionNotFound),
-        Some((s,)) if s == "active" => Ok(()),
-        Some(_) => Err(AppError::SessionExpired),
-    }
-}
 
 async fn next_index(db: &SqlitePool, session_id: &str) -> AppResult<u32> {
     let row: (Option<i64>,) =

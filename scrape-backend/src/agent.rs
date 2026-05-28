@@ -25,22 +25,14 @@ pub enum Envelope {
     NoCode { reason: String },
 }
 
-/// One-shot: read signals + intention from the session, ask Gemini, parse out
-/// the ```js-action fence. Persistence is the caller's job.
+/// Drive one LLM step for `session_id`. Builds the chat history from every
+/// persisted turn — initial signals + intention, prior code emissions, prior
+/// extraction results, follow-up user messages — so refinements are coherent
+/// across many back-and-forths in the same session.
 pub async fn step(state: &AppState, session_id: &str) -> AppResult<Envelope> {
     let db = state.db();
     let session = load_session(db, session_id).await?;
-    let signals = load_signals_payload(db, session_id).await?;
-
-    let system = SYSTEM_PROMPT.to_string();
-    let user = format!(
-        "Page URL: {url}\n\nUser intention:\n{intent}\n\nPage signals (JSON):\n{signals}",
-        url = session.url,
-        intent = session.intention,
-        signals = truncate(&signals, 80_000),
-    );
-
-    let messages = vec![ChatMessage::system(system), ChatMessage::user(user)];
+    let messages = build_messages(db, session_id, &session).await?;
     let req = ChatRequest::from_messages(messages);
     let opts = ChatOptions::default();
 
@@ -48,7 +40,6 @@ pub async fn step(state: &AppState, session_id: &str) -> AppResult<Envelope> {
         target: "scrape_backend::agent",
         session_id = %session_id,
         model = %state.inner.llm.model,
-        signals_chars = signals.len(),
         "calling gemini for code"
     );
 
@@ -157,22 +148,118 @@ async fn load_session(db: &SqlitePool, id: &str) -> AppResult<SessionRow> {
     .await?;
     match row {
         None => Err(AppError::SessionNotFound),
-        Some((_, _, s)) if s != "active" => Err(AppError::SessionExpired),
         Some((url, intention, _)) => Ok(SessionRow { url, intention }),
     }
 }
 
-/// Pull the signals turn (turn 0, role=extension, kind=signals) as a JSON string.
-async fn load_signals_payload(db: &SqlitePool, session_id: &str) -> AppResult<String> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT payload FROM turns
-         WHERE session_id = ?1 AND role = 'extension' AND kind = 'signals'
-         ORDER BY turn_index ASC LIMIT 1",
+/// Convert the persisted turn log into a Gemini chat history.
+///
+/// First user message bundles URL + initial intention + signals (the static
+/// page context). After that we replay turns in order:
+///   - llm/code        → assistant("rationale\n```js-action\n<code>\n```")
+///   - llm/no_code     → assistant("<reason>")
+///   - extension/result → user("<extraction summary + sample items>")
+///   - user/message    → user("<refinement>")
+///
+/// Signals and intention are *not* repeated on follow-up turns; the model
+/// already saw them at the top of the conversation.
+async fn build_messages(
+    db: &SqlitePool,
+    session_id: &str,
+    session: &SessionRow,
+) -> AppResult<Vec<ChatMessage>> {
+    let mut out: Vec<ChatMessage> = Vec::new();
+    out.push(ChatMessage::system(SYSTEM_PROMPT.to_string()));
+
+    let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+        "SELECT turn_index, role, kind, payload FROM turns
+         WHERE session_id = ?1 ORDER BY turn_index ASC",
     )
     .bind(session_id)
-    .fetch_optional(db)
+    .fetch_all(db)
     .await?;
-    Ok(row.map(|(p,)| p).unwrap_or_else(|| "{}".into()))
+
+    let signals = rows
+        .iter()
+        .find(|(_, r, k, _)| r == "extension" && k == "signals")
+        .map(|(_, _, _, p)| p.clone())
+        .unwrap_or_else(|| "{}".into());
+
+    out.push(ChatMessage::user(format!(
+        "Page URL: {url}\n\nInitial intention:\n{intent}\n\nPage signals (JSON):\n{signals}",
+        url = session.url,
+        intent = session.intention,
+        signals = truncate(&signals, 80_000),
+    )));
+
+    for (_, role, kind, payload) in &rows {
+        match (role.as_str(), kind.as_str()) {
+            ("llm", "code") => {
+                // Persisted Turn::Code; reconstruct the assistant message
+                // that originally produced it (rationale + js-action fence).
+                let v: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+                let code = v.get("code").and_then(|c| c.as_str()).unwrap_or("");
+                let rationale = v.get("rationale").and_then(|c| c.as_str()).unwrap_or("");
+                let text = format!("{rationale}\n\n```js-action\n{code}\n```");
+                out.push(ChatMessage::assistant(text));
+            }
+            ("llm", "no_code") => {
+                let v: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+                let reason = v.get("reason").and_then(|c| c.as_str()).unwrap_or("");
+                out.push(ChatMessage::assistant(format!("(no code) {reason}")));
+            }
+            ("extension", "result") => {
+                let summary = summarize_result(payload);
+                out.push(ChatMessage::user(format!(
+                    "<extraction_result>\n{summary}\n</extraction_result>"
+                )));
+            }
+            ("user", "message") => {
+                let v: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+                let content = v.get("content").and_then(|c| c.as_str()).unwrap_or(payload.as_str());
+                out.push(ChatMessage::user(content.to_string()));
+            }
+            // signals + everything else (older "tool_call", "validation_error",
+            // "clarify_answer", "result" telemetry shapes) are skipped — the
+            // signals are already in the first user message and the other
+            // kinds aren't part of the active codegen flow anymore.
+            _ => {}
+        }
+    }
+
+    Ok(out)
+}
+
+/// Produce a compact text summary of an `/api/sessions/:id/result` payload.
+/// The model needs to know how many items came back and what they looked
+/// like so it can refine its next code.
+fn summarize_result(payload_json: &str) -> String {
+    let v: serde_json::Value = match serde_json::from_str(payload_json) {
+        Ok(v) => v,
+        Err(_) => return truncate(payload_json, 1_500),
+    };
+    let items = v.get("items_count").and_then(|x| x.as_u64()).unwrap_or(0);
+    let errors = v.get("errors")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| e.as_str().map(String::from))
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .unwrap_or_default();
+    let sample = v.get("sample_items").cloned().unwrap_or(serde_json::Value::Null);
+    let sample_str = if sample.is_null() {
+        String::new()
+    } else {
+        format!("\nSample items: {}", truncate(&sample.to_string(), 2_000))
+    };
+    let err_line = if errors.is_empty() {
+        String::new()
+    } else {
+        format!("\nErrors: {}", truncate(&errors, 1_000))
+    };
+    format!("Code returned {items} item(s).{err_line}{sample_str}")
 }
 
 // ──────────────────────────── system prompt ────────────────────────────────

@@ -32,8 +32,23 @@ per turn; `RUST_LOG=scrape_backend=info` for quieter output.
 
 ## Install the extension
 
+The extension is built with Vite + Tailwind v4 + `@crxjs/vite-plugin`. You
+need Node 20+.
+
+```sh
+cd extension
+npm install
+npm run build      # produces extension/dist/
+```
+
+For iterative development, `npm run dev` keeps Vite watching: edits to
+`popup.html`, `popup.css`, `popup.js`, etc. trigger an automatic rebuild and
+the extension hot-reloads in Chrome.
+
+Then:
+
 1. Open `chrome://extensions`, enable **Developer mode** (top-right).
-2. **Load unpacked** → select the `extension/` folder.
+2. **Load unpacked** → select `extension/dist/` (not `extension/`).
 3. On the extension's card, turn on **Allow User Scripts**.
    - This toggle only appears when Developer mode is on and the extension
      declares the `userScripts` permission. We need it because runtime code
@@ -89,15 +104,21 @@ objects.
 
 ### `extension/`
 
+- `package.json` / `vite.config.js` — build pipeline (Vite +
+  `@crxjs/vite-plugin` + Tailwind v4).
 - `manifest.json` — MV3, requests `activeTab`, `scripting`, `downloads`,
-  `storage`, `userScripts`, and broad host access.
+  `storage`, `userScripts`, broad host access; declares `dom-signals.js`
+  as a `web_accessible_resource` so it ends up in the bundle.
 - `popup.html` / `popup.css` / `popup.js` — the popup UI; drives the
-  collect-signals → POST → run-code → download cycle.
+  collect-signals → POST → run-code → download cycle. Tailwind classes
+  on the static markup; `popup.css` defines a few component classes
+  (`.turn`, `.result-line`) via `@apply` for the JS-built transcript.
 - `dom-signals.js` — content script that builds the page fingerprint
   (`__NEXT_DATA__`, JSON-LD, meta, candidate selectors, samples, DOM
   skeleton) under a 240 KB budget.
 - `backend.js` — `fetch` wrapper around `http://localhost:4546`.
 - `background.js` — empty MV3 service worker.
+- `dist/` — Vite build output. **This is what you load in Chrome.**
 
 ### `scrape-backend/`
 

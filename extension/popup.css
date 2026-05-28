@@ -1,152 +1,55 @@
-:root {
-  --bg: #ffffff;
-  --fg: #111;
-  --muted: #6b6b6b;
-  --border: #e5e5e5;
-  --accent: #6c5ce7;
-  --accent-fg: #fff;
+@import "tailwindcss";
+
+/* Theme tokens — keep the accent / muted colors callable as utilities. */
+@theme {
+  --color-accent: #6c5ce7;
+  --color-accent-fg: #ffffff;
 }
 
-* { box-sizing: border-box; }
+@layer components {
+  /* Chat bubbles — the popup builds these from popup.js at runtime. */
+  .turn {
+    @apply rounded-md px-3 py-2.5 text-lg leading-snug break-words;
+  }
+  .turn.user {
+    @apply self-end max-w-[92%] bg-indigo-50 border border-indigo-200;
+  }
+  .turn.user::before {
+    content: "you";
+    @apply block text-xs text-gray-500 mb-1;
+  }
+  .turn.assistant {
+    @apply bg-gray-50 border border-gray-200;
+  }
+  .turn.assistant::before {
+    content: "assistant";
+    @apply block text-xs text-gray-500 mb-1.5;
+  }
+  .turn .rationale {
+    @apply text-lg text-gray-700 m-0 mb-2;
+  }
+  .turn details {
+    @apply mt-1.5 bg-white border border-gray-200 rounded;
+  }
+  .turn details > summary {
+    @apply px-2.5 py-1.5 cursor-pointer select-none text-sm text-gray-500;
+  }
+  .turn details > pre {
+    @apply m-0 p-2.5 border-t border-gray-200 text-sm font-mono
+           whitespace-pre-wrap break-words max-h-[220px] overflow-auto;
+  }
 
-body {
-  width: 360px;
-  margin: 0;
-  padding: 14px 16px 16px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  font-size: 13px;
-  color: var(--fg);
-  background: var(--bg);
-}
-
-header h1 {
-  margin: 0 0 2px;
-  font-size: 15px;
-}
-
-.muted { color: var(--muted); font-size: 12px; margin: 0; }
-
-.actions { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
-.row { display: flex; gap: 8px; }
-.row > button { flex: 1; }
-
-.intention {
-  margin-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.intention label {
-  font-size: 12px;
-  color: var(--muted);
-}
-.intention textarea {
-  width: 100%;
-  resize: vertical;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px;
-  font-family: inherit;
-  font-size: 12px;
-}
-.intention textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-
-.rationale {
-  margin-top: 10px;
-  padding: 6px 8px;
-  border-left: 3px solid var(--accent);
-  background: #f6f4ff;
-  font-size: 12px;
-  color: #333;
+  .result-line {
+    @apply flex justify-between items-center gap-2 mt-2;
+  }
+  .result-line strong { @apply text-lg; }
+  .result-line .actions { @apply flex gap-1.5; }
+  .result-line button {
+    @apply px-2 py-1 text-sm border border-gray-200 rounded
+           bg-gray-50 hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
 }
 
-.code-wrap {
-  margin-top: 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #fafafa;
-}
-.code-wrap > summary {
-  padding: 6px 8px;
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--muted);
-  user-select: none;
-}
-.code-wrap pre {
-  margin: 0;
-  padding: 8px;
-  border-top: 1px solid var(--border);
-  font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 200px;
-  overflow: auto;
-}
-
-#result-rationale {
-  font-style: italic;
-  max-width: 60%;
-  text-align: right;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-button {
-  appearance: none;
-  border: 1px solid var(--border);
-  background: #fafafa;
-  color: var(--fg);
-  padding: 7px 10px;
-  border-radius: 6px;
-  font-size: 13px;
-  cursor: pointer;
-}
-button:hover:not(:disabled) { background: #f0f0f0; }
-button:disabled { opacity: 0.5; cursor: not-allowed; }
-
-button.primary {
-  background: var(--accent);
-  color: var(--accent-fg);
-  border-color: var(--accent);
-}
-button.primary:hover:not(:disabled) { filter: brightness(0.95); }
-
-button.link {
-  background: transparent;
-  border: none;
-  color: var(--accent);
-  padding: 0;
-  font-size: 12px;
-}
-
-.preview {
-  margin-top: 12px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px;
-  max-height: 220px;
-  overflow: auto;
-}
-.preview-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 6px;
-}
-.preview pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: #333;
-}
-
-.hidden { display: none; }
-
-#status { margin-top: 10px; min-height: 16px; }
+/* Status colors set imperatively by popup.js via el.className = "ok" | "error". */
 #status.error { color: #c0392b; }
-#status.ok { color: #1e7f4f; }
+#status.ok    { color: #1e7f4f; }

@@ -44,11 +44,8 @@ export const backend = {
   createSession({ url, intention, signals }) {
     return postJson("/api/sessions", { url, intention, signals });
   },
-  toolResult(sessionId, { tool_call_id, result, error = null }) {
-    return postJson(`/api/sessions/${sessionId}/tool_result`, { tool_call_id, result, error });
-  },
-  clarifyAnswer(sessionId, answer) {
-    return postJson(`/api/sessions/${sessionId}/clarify`, { answer });
+  sendMessage(sessionId, content) {
+    return postJson(`/api/sessions/${sessionId}/message`, { content });
   },
   recordResult(sessionId, payload) {
     return postJson(`/api/sessions/${sessionId}/result`, payload);
