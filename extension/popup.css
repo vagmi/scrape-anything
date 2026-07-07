@@ -39,6 +39,27 @@
            whitespace-pre-wrap break-words max-h-[220px] overflow-auto;
   }
 
+  /* Tool-call bubble (execute_script / screenshot steps). */
+  .turn.tool {
+    @apply bg-white border border-gray-200 text-base;
+  }
+  .turn.tool::before {
+    content: "tool";
+    @apply block text-xs text-gray-400 mb-1;
+  }
+  .turn.tool .tool-head {
+    @apply flex justify-between items-center gap-2;
+  }
+  .turn.tool .tool-name {
+    @apply font-mono text-sm text-gray-700;
+  }
+  .turn.tool .tool-status {
+    @apply text-sm text-gray-500;
+  }
+  .turn.tool .tool-status.error {
+    @apply text-red-600;
+  }
+
   .result-line {
     @apply flex justify-between items-center gap-2 mt-2;
   }

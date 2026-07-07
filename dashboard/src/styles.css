@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+/* Scan the Rust maud fragments so the utility classes they emit are generated. */
+@source "../../scrape-backend/src";
+
+@theme {
+  --color-accent: #6c5ce7;
+}
+
+@layer components {
+  /* Shared button/link used by both the shell and the server-rendered fragments. */
+  .btn {
+    @apply inline-flex items-center rounded-md border border-gray-300 px-2.5 py-1
+           text-sm no-underline text-gray-700 cursor-pointer
+           hover:bg-gray-100 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700;
+  }
+}

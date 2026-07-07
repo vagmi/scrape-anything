@@ -1,31 +1,59 @@
-//! Session lifecycle for the code-generation flow.
+//! Session lifecycle for the function-calling agent.
 //!
-//! Each session is now a one-shot: create() collects signals, asks the agent
-//! for code, persists everything, returns. Cached code blobs live in `plans`
-//! (table name kept for continuity — they're still keyed by host+route+intention).
+//! A session is a conversation: an intention + a starting page, then a loop of
+//! LLM steps. Each step the model may call tools. Server-side tools
+//! (list/read/write/edit over the per-origin file store) are resolved inline in
+//! `advance()`; extension-side tools (`execute_script`, `screenshot`) are handed
+//! back to the extension, which runs them in the live tab and POSTs the results
+//! to `/tool_result`, resuming the loop. The session ends when the model
+//! replies with plain text (no tool calls).
 //!
-//! The handle_tool_result / handle_clarify_answer endpoints are retained as
-//! deprecated no-ops so the older protocol shape doesn't 404 noisily.
+//! Extracted rows (an `execute_script` result shaped `{ kind, items }`) are
+//! upserted into the `artifacts` table and serve the JSON/CSV downloads.
 
 use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use ulid::Ulid;
 
-use crate::agent::{self, Envelope};
+use crate::agent;
 use crate::error::{AppError, AppResult};
 use crate::signals::Signals;
 use crate::state::AppState;
+use crate::tools;
 
-/// What the extension sees back.
+/// A pending extension-side tool call handed to the extension to execute.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingCall {
+    pub call_id: String,
+    pub tool: String,
+    pub args: Value,
+}
+
+/// What the extension sees back from create/message/tool_result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Turn {
-    Code   { code: String, rationale: String, turn_index: u32, tokens_used: u32 },
-    NoCode { reason: String, turn_index: u32 },
+    /// The extension must run these tools and reply via `/tool_result`.
+    ToolCall { tool_calls: Vec<PendingCall>, turn_index: u32 },
+    /// Terminal: the agent's closing message. No more tools to run.
+    Message { text: String, turn_index: u32 },
+}
+
+/// One tool result posted back by the extension.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolResultItem {
+    pub call_id: String,
+    /// The tool that was run (so we can label the stored response).
+    #[serde(default)]
+    pub tool: Option<String>,
+    #[serde(default)]
+    pub result: Value,
+    #[serde(default)]
+    pub error: Option<Value>,
 }
 
 pub async fn create(
@@ -66,44 +94,8 @@ pub async fn create(
     Ok((session_id, turn))
 }
 
-/// Telemetry from the extension after running the code. Drives cache scoring
-/// and lets us mark sessions completed.
-pub async fn record_result(
-    state: &AppState,
-    session_id: &str,
-    payload: Value,
-) -> AppResult<()> {
-    // record_result fires after a code turn — the session has already been
-    // marked completed by `advance`. We just need it to exist.
-    session_must_exist(state.db(), session_id).await?;
-    let idx = next_index(state.db(), session_id).await?;
-    let body = payload.to_string();
-    let items = payload.get("items_count").and_then(|v| v.as_u64()).unwrap_or(0);
-    let errs = payload.get("errors").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
-
-    tracing::info!(
-        target: "scrape_backend::session",
-        session_id = %session_id,
-        items_count = items,
-        error_count = errs,
-        bytes = body.len(),
-        payload = %truncate_for_log(&body, 1_500),
-        "extension result received"
-    );
-
-    insert_turn(state.db(), session_id, idx, "extension", "result", &body).await?;
-    sqlx::query("UPDATE sessions SET status = 'completed', updated_at = ?1 WHERE id = ?2")
-        .bind(Utc::now().timestamp_millis())
-        .bind(session_id)
-        .execute(state.db())
-        .await?;
-    Ok(())
-}
-
-/// Append a follow-up user message and run the next agent step. This is the
-/// multi-turn refinement path: the session must exist but doesn't need to be
-/// in `active` status (completed and gave_up sessions can be revived by
-/// continuing the conversation).
+/// Append a follow-up user message and resume the loop. Revives completed
+/// sessions (continuing the conversation refines the result).
 pub async fn handle_message(
     state: &AppState,
     session_id: &str,
@@ -114,7 +106,6 @@ pub async fn handle_message(
         return Err(AppError::BadSignals("message content is empty".into()));
     }
     session_must_exist(state.db(), session_id).await?;
-    // Re-open if we previously marked completed/gave_up.
     mark_status(state.db(), session_id, "active").await?;
 
     let idx = next_index(state.db(), session_id).await?;
@@ -124,24 +115,70 @@ pub async fn handle_message(
         session_id = %session_id,
         turn_index = idx,
         content = %truncate_for_log(trimmed, 400),
-        "extension user message received"
+        "user message"
     );
     insert_turn(state.db(), session_id, idx, "user", "message", &payload).await?;
     advance(state, session_id).await
 }
 
-/// Deprecated. The old agentic loop with tool calls is gone; the endpoint
-/// stays so old extension builds get a clear 410 instead of a 404.
+/// Results from the extension for the tools it just ran. Persists a
+/// tool_response per call, upserts any `{kind,items}` artifact, then resumes
+/// the loop and returns the next turn.
 pub async fn handle_tool_result(
-    _state: &AppState,
-    _session_id: &str,
-    _tool_call_id: &str,
-    _result: Value,
+    state: &AppState,
+    session_id: &str,
+    results: Vec<ToolResultItem>,
 ) -> AppResult<Turn> {
-    Err(AppError::SessionExpired)
+    session_must_exist(state.db(), session_id).await?;
+
+    for item in &results {
+        let fn_name = item.tool.clone().unwrap_or_default();
+        let (content, image, mime) = if let Some(err) = &item.error {
+            (json!({ "error": err }).to_string(), None, None)
+        } else if let Some(img) = item.result.get("image_base64").and_then(|v| v.as_str()) {
+            let mime = item
+                .result
+                .get("mime")
+                .and_then(|v| v.as_str())
+                .unwrap_or("image/png")
+                .to_string();
+            (
+                "Screenshot captured; the image follows.".to_string(),
+                Some(img.to_string()),
+                Some(mime),
+            )
+        } else {
+            (item.result.to_string(), None, None)
+        };
+
+        tracing::info!(
+            target: "scrape_backend::session",
+            session_id = %session_id,
+            tool = %fn_name,
+            call_id = %item.call_id,
+            is_error = item.error.is_some(),
+            "tool result"
+        );
+
+        persist_tool_response(
+            state.db(),
+            session_id,
+            &fn_name,
+            &item.call_id,
+            &content,
+            image.as_deref(),
+            mime.as_deref(),
+        )
+        .await?;
+
+        maybe_store_artifact(state.db(), session_id, &item.result).await?;
+    }
+
+    advance(state, session_id).await
 }
 
-/// Deprecated, see `handle_tool_result`.
+/// Deprecated. The old clarify protocol is gone; keep the endpoint returning a
+/// clear 410 rather than a 404 for old extension builds.
 pub async fn handle_clarify_answer(
     _state: &AppState,
     _session_id: &str,
@@ -150,23 +187,30 @@ pub async fn handle_clarify_answer(
     Err(AppError::SessionExpired)
 }
 
+/// Optional post-run telemetry from the extension (kept for compatibility).
+pub async fn record_result(state: &AppState, session_id: &str, payload: Value) -> AppResult<()> {
+    session_must_exist(state.db(), session_id).await?;
+    let idx = next_index(state.db(), session_id).await?;
+    insert_turn(state.db(), session_id, idx, "extension", "result", &payload.to_string()).await?;
+    Ok(())
+}
+
 async fn session_must_exist(db: &SqlitePool, session_id: &str) -> AppResult<()> {
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM sessions WHERE id = ?1")
-            .bind(session_id)
-            .fetch_optional(db)
-            .await?;
+    let row: Option<(String,)> = sqlx::query_as("SELECT id FROM sessions WHERE id = ?1")
+        .bind(session_id)
+        .fetch_optional(db)
+        .await?;
     if row.is_none() { Err(AppError::SessionNotFound) } else { Ok(()) }
 }
 
 pub async fn fetch_full(state: &AppState, session_id: &str) -> AppResult<Value> {
-    let row: Option<(String, String, String, String, String, i64, i64)> = sqlx::query_as(
-        "SELECT id, url, host, route, intention, created_at, updated_at FROM sessions WHERE id = ?1",
+    let row: Option<(String, String, String, String, String, String, i64, i64)> = sqlx::query_as(
+        "SELECT id, url, host, route, intention, status, created_at, updated_at FROM sessions WHERE id = ?1",
     )
     .bind(session_id)
     .fetch_optional(state.db())
     .await?;
-    let Some((id, url, host, route, intention, created_at, updated_at)) = row else {
+    let Some((id, url, host, route, intention, status, created_at, updated_at)) = row else {
         return Err(AppError::SessionNotFound);
     };
 
@@ -197,130 +241,169 @@ pub async fn fetch_full(state: &AppState, session_id: &str) -> AppResult<Value> 
         "host": host,
         "route": route,
         "intention": intention,
+        "status": status,
         "created_at": created_at,
         "updated_at": updated_at,
         "turns": turns,
     }))
 }
 
-// ───────────────────── core driver: one LLM step per call ───────────────────
+// ───────────────────── core driver: the agent loop ──────────────────────────
 
 async fn advance(state: &AppState, session_id: &str) -> AppResult<Turn> {
-    let env = agent::step(state, session_id).await?;
-    let idx = next_index(state.db(), session_id).await?;
-    let turn = match env {
-        Envelope::Code { code, rationale } => Turn::Code {
-            code,
-            rationale,
-            turn_index: idx,
-            tokens_used: 0,
-        },
-        Envelope::NoCode { reason } => Turn::NoCode { reason, turn_index: idx },
-    };
-    persist_turn(state.db(), session_id, &turn).await?;
-    tracing::debug!(
-        target: "scrape_backend::session",
-        session_id = %session_id,
-        turn_index = idx,
-        kind = turn_kind_str(&turn),
-        "persisted turn"
-    );
+    let db = state.db();
+    let host = session_host(db, session_id).await?;
+    let max_turns = state.config().llm.max_turns;
 
-    match &turn {
-        Turn::Code { .. } => {
-            // Cache the code blob keyed on host+route_pattern+intention.
-            cache_code(state, session_id, &turn).await.ok();
-            mark_status(state.db(), session_id, "completed").await?;
-            tracing::info!(target: "scrape_backend::session", %session_id, "session emitted code");
+    loop {
+        // Hard cap on the number of LLM steps in one session.
+        let steps = count_assistant_turns(db, session_id).await?;
+        if steps >= max_turns {
+            let idx = persist_assistant_text(
+                db,
+                session_id,
+                "Stopped: reached the maximum number of steps for this session.",
+            )
+            .await?;
+            mark_status(db, session_id, "completed").await?;
+            return Ok(Turn::Message {
+                text: "Stopped: reached the maximum number of steps for this session.".into(),
+                turn_index: idx,
+            });
         }
-        Turn::NoCode { reason, .. } => {
-            mark_status(state.db(), session_id, "gave_up").await?;
-            tracing::info!(target: "scrape_backend::session", %session_id, reason = %reason, "session no_code");
+
+        let step = agent::step(state, session_id).await?;
+        let idx = persist_assistant(db, session_id, &step).await?;
+
+        if step.tool_calls.is_empty() {
+            mark_status(db, session_id, "completed").await?;
+            tracing::info!(target: "scrape_backend::session", %session_id, "session completed (final message)");
+            return Ok(Turn::Message {
+                text: step.text.unwrap_or_default(),
+                turn_index: idx,
+            });
         }
+
+        // Resolve server-side tools inline; collect extension-side tools.
+        let mut pending: Vec<PendingCall> = Vec::new();
+        for call in &step.tool_calls {
+            if tools::is_server_side(&call.fn_name) {
+                let resp = tools::run_server_tool(db, &host, call).await;
+                persist_tool_response(db, session_id, &call.fn_name, &resp.call_id, &resp.content, None, None)
+                    .await?;
+            } else {
+                pending.push(PendingCall {
+                    call_id: call.call_id.clone(),
+                    tool: call.fn_name.clone(),
+                    args: call.fn_arguments.clone(),
+                });
+            }
+        }
+
+        if pending.is_empty() {
+            // All calls were server-side — ask the model again immediately.
+            continue;
+        }
+
+        mark_status(db, session_id, "active").await?;
+        return Ok(Turn::ToolCall { tool_calls: pending, turn_index: idx });
     }
-    Ok(turn)
 }
 
-fn turn_kind_str(t: &Turn) -> &'static str {
-    match t {
-        Turn::Code   { .. } => "code",
-        Turn::NoCode { .. } => "no_code",
-    }
-}
+// ───────────────────────────── artifacts ────────────────────────────────────
 
-// ───────────────────────────── code cache ───────────────────────────────────
-
-async fn cache_code(state: &AppState, session_id: &str, turn: &Turn) -> AppResult<()> {
-    let (code, rationale) = match turn {
-        Turn::Code { code, rationale, .. } => (code.clone(), rationale.clone()),
-        _ => return Ok(()),
+/// If a tool result looks like an extraction (`{ kind, items:[…] }` with a
+/// non-empty array), upsert it as the session's artifact (latest wins).
+async fn maybe_store_artifact(db: &SqlitePool, session_id: &str, result: &Value) -> AppResult<()> {
+    let Some(items) = result.get("items").and_then(|v| v.as_array()) else {
+        return Ok(());
     };
-    let row: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT host, route, intention_hash FROM sessions WHERE id = ?1",
-    )
-    .bind(session_id)
-    .fetch_optional(state.db())
-    .await?;
-    let Some((host, route, intention_hash)) = row else { return Ok(()); };
-    let pattern = normalize_route(&host, &route, &state.config().routes);
+    if items.is_empty() {
+        return Ok(());
+    }
+    let kind = result.get("kind").and_then(|v| v.as_str()).unwrap_or("listing").to_string();
+    let items_json = serde_json::to_string(items).unwrap_or_else(|_| "[]".into());
     let now = Utc::now().timestamp_millis();
     let id = Ulid::new().to_string();
-    // Reuse the plans table; plan_json now stores { code, rationale }.
-    let plan_json = json!({ "code": code, "rationale": rationale }).to_string();
 
     sqlx::query(
-        "INSERT INTO plans (id, host, route_pattern, intention_hash, plan_json, rationale,
-                            success_count, failure_count, invalidated, created_at, last_used_at, source_session)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0, 0, ?7, ?7, ?8)
-         ON CONFLICT(host, route_pattern, intention_hash) DO UPDATE SET
-             plan_json    = excluded.plan_json,
-             rationale    = excluded.rationale,
-             last_used_at = excluded.last_used_at,
-             invalidated  = 0,
-             source_session = excluded.source_session",
+        "INSERT INTO artifacts (id, session_id, kind, item_count, items_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+         ON CONFLICT(session_id) DO UPDATE SET
+             kind       = excluded.kind,
+             item_count = excluded.item_count,
+             items_json = excluded.items_json,
+             updated_at = excluded.updated_at",
     )
     .bind(&id)
-    .bind(&host)
-    .bind(&pattern)
-    .bind(&intention_hash)
-    .bind(&plan_json)
-    .bind(&rationale)
-    .bind(now)
     .bind(session_id)
-    .execute(state.db())
+    .bind(&kind)
+    .bind(items.len() as i64)
+    .bind(&items_json)
+    .bind(now)
+    .execute(db)
     .await?;
+    tracing::info!(target: "scrape_backend::session", %session_id, items = items.len(), kind = %kind, "artifact stored");
     Ok(())
 }
 
-fn normalize_route(host: &str, route: &str, host_rules: &[crate::config::HostRoutes]) -> String {
-    let lower = route.trim_end_matches('/').to_lowercase();
-    let lower = if lower.is_empty() { "/".to_string() } else { lower };
+// ─────────────────────────── small DB helpers ───────────────────────────────
 
-    if let Some(rules) = host_rules.iter().find(|r| r.host == host) {
-        for p in &rules.patterns {
-            if let Ok(re) = regex::Regex::new(&p.match_re) {
-                if re.is_match(&lower) {
-                    return re.replace_all(&lower, p.replace.as_str()).into_owned();
-                }
-            }
-        }
-    }
-    let parts: Vec<String> = lower
-        .split('/')
-        .map(|seg| {
-            if seg.len() >= 16 && seg.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-                ":id".to_string()
-            } else if !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()) {
-                ":n".to_string()
-            } else {
-                seg.to_string()
-            }
-        })
-        .collect();
-    parts.join("/")
+async fn session_host(db: &SqlitePool, session_id: &str) -> AppResult<String> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT host FROM sessions WHERE id = ?1")
+        .bind(session_id)
+        .fetch_optional(db)
+        .await?;
+    row.map(|r| r.0).ok_or(AppError::SessionNotFound)
 }
 
-// ─────────────────────────── small DB helpers ───────────────────────────────
+async fn count_assistant_turns(db: &SqlitePool, session_id: &str) -> AppResult<u32> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM turns WHERE session_id = ?1 AND role = 'llm' AND kind = 'assistant'",
+    )
+    .bind(session_id)
+    .fetch_one(db)
+    .await?;
+    Ok(row.0 as u32)
+}
+
+async fn persist_assistant(db: &SqlitePool, session_id: &str, step: &agent::Step) -> AppResult<u32> {
+    let idx = next_index(db, session_id).await?;
+    let stored_calls: Vec<Value> = step
+        .tool_calls
+        .iter()
+        .map(|c| json!({ "call_id": c.call_id, "fn_name": c.fn_name, "fn_arguments": c.fn_arguments }))
+        .collect();
+    let payload = json!({ "text": step.text, "tool_calls": stored_calls }).to_string();
+    insert_turn(db, session_id, idx, "llm", "assistant", &payload).await?;
+    Ok(idx)
+}
+
+async fn persist_assistant_text(db: &SqlitePool, session_id: &str, text: &str) -> AppResult<u32> {
+    let idx = next_index(db, session_id).await?;
+    let payload = json!({ "text": text, "tool_calls": [] }).to_string();
+    insert_turn(db, session_id, idx, "llm", "assistant", &payload).await?;
+    Ok(idx)
+}
+
+async fn persist_tool_response(
+    db: &SqlitePool,
+    session_id: &str,
+    fn_name: &str,
+    call_id: &str,
+    content: &str,
+    image_base64: Option<&str>,
+    mime: Option<&str>,
+) -> AppResult<()> {
+    let idx = next_index(db, session_id).await?;
+    let mut obj = json!({ "call_id": call_id, "fn_name": fn_name, "content": content });
+    if let Some(img) = image_base64 {
+        obj["image_base64"] = json!(img);
+        obj["mime"] = json!(mime.unwrap_or("image/png"));
+    }
+    insert_turn(db, session_id, idx, "tool", "tool_response", &obj.to_string()).await?;
+    Ok(())
+}
 
 async fn next_index(db: &SqlitePool, session_id: &str) -> AppResult<u32> {
     let row: (Option<i64>,) =
@@ -355,15 +438,6 @@ async fn insert_turn(
     Ok(())
 }
 
-async fn persist_turn(db: &SqlitePool, session_id: &str, turn: &Turn) -> AppResult<()> {
-    let (idx, kind, payload) = match turn {
-        Turn::Code   { turn_index, .. } => (*turn_index, "code",    serde_json::to_string(turn).unwrap()),
-        Turn::NoCode { turn_index, .. } => (*turn_index, "no_code", serde_json::to_string(turn).unwrap()),
-    };
-    insert_turn(db, session_id, idx, "llm", kind, &payload).await?;
-    Ok(())
-}
-
 async fn mark_status(db: &SqlitePool, session_id: &str, status: &str) -> AppResult<()> {
     sqlx::query("UPDATE sessions SET status = ?1, updated_at = ?2 WHERE id = ?3")
         .bind(status)
@@ -381,14 +455,17 @@ fn hash_hex(s: &str) -> String {
 }
 
 fn url_host_and_path(input: &str) -> Result<(String, String), &'static str> {
-    let rest = input.strip_prefix("https://")
+    let rest = input
+        .strip_prefix("https://")
         .or_else(|| input.strip_prefix("http://"))
         .ok_or("scheme must be http(s)")?;
     let (authority, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
     };
-    if authority.is_empty() { return Err("missing host"); }
+    if authority.is_empty() {
+        return Err("missing host");
+    }
     let path = path.split(['?', '#']).next().unwrap_or("/");
     Ok((authority.to_string(), path.to_string()))
 }

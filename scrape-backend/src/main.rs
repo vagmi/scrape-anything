@@ -1,7 +1,9 @@
 mod agent;
 mod config;
+mod csv;
 mod db;
 mod dsl;
+mod edit_ops;
 mod error;
 mod llm;
 mod routes;

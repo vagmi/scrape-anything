@@ -47,14 +47,20 @@ export const backend = {
   sendMessage(sessionId, content) {
     return postJson(`/api/sessions/${sessionId}/message`, { content });
   },
-  recordResult(sessionId, payload) {
-    return postJson(`/api/sessions/${sessionId}/result`, payload);
+  // Post the results of the extension-side tools the agent asked us to run.
+  // `results` is an array of { call_id, tool, result } | { call_id, tool, error }.
+  sendToolResult(sessionId, results) {
+    return postJson(`/api/sessions/${sessionId}/tool_result`, { results });
   },
   fetchSession(sessionId) {
     return getJson(`/api/sessions/${sessionId}`);
   },
-  lookupPlan({ host, route, intention_hash }) {
-    const q = new URLSearchParams({ host, route, intention_hash }).toString();
-    return getJson(`/api/plans/lookup?${q}`);
+  // The extracted rows the agent stored for this session (or 404 if none yet).
+  fetchArtifact(sessionId) {
+    return getJson(`/api/sessions/${sessionId}/artifact`);
+  },
+  // Direct download URL served by the backend with a Content-Disposition header.
+  artifactUrl(artifactId, format) {
+    return `${baseUrl()}/api/artifacts/${artifactId}.${format}`;
   },
 };

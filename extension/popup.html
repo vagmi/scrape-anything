@@ -27,6 +27,25 @@
       class="hidden mt-3 flex flex-col gap-3 max-h-[420px] overflow-y-auto pr-1"
     ></section>
 
+    <section
+      id="results"
+      class="hidden mt-3 flex items-center justify-between gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2"
+    >
+      <span id="results-count" class="text-base text-gray-700">—</span>
+      <span class="flex gap-2">
+        <button
+          id="dl-json"
+          class="rounded-md border border-gray-300 bg-white px-2.5 py-1 text-sm cursor-pointer hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
+          disabled
+        >JSON</button>
+        <button
+          id="dl-csv"
+          class="rounded-md border border-gray-300 bg-white px-2.5 py-1 text-sm cursor-pointer hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
+          disabled
+        >CSV</button>
+      </span>
+    </section>
+
     <section id="composer" class="mt-4 flex flex-col gap-2">
       <label id="composer-label" for="message" class="text-base text-gray-600">
         What do you want extracted?

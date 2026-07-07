@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Scrape Anything",
-  "version": "0.3.0",
-  "description": "LLM-generated scraping for any web page. Local backend on http://localhost:4546.",
+  "version": "0.4.0",
+  "description": "Agentic LLM scraping for any web page. Local backend on http://localhost:4546.",
   "permissions": ["activeTab", "scripting", "downloads", "storage", "userScripts"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "action": {

@@ -1,17 +1,21 @@
 # scrape-anything
 
-LLM-generated web scraping from a Chrome extension. A Rust backend asks
-Gemini to write a JavaScript function for a given page + intention; the
-extension runs it in the tab via `chrome.userScripts` and returns the
-extracted records. Works on any page; the bundled system-prompt example
-uses Luma because its `__NEXT_DATA__` structure is a clean reference.
+Agentic LLM web scraping from a Chrome extension. A Rust backend runs Gemini as
+a small **function-calling agent**: it probes the page, writes and runs
+JavaScript in the tab, and can *see* the page via a screenshot — then returns
+the extracted records. It keeps a **per-origin memory** (a virtual file store in
+SQLite) so a second run on the same site reuses what it learned. Extracted rows
+are stored as **artifacts** (downloadable JSON/CSV), and a built-in **dashboard**
+browses past sessions and their memory. Works on any page; the bundled
+system-prompt example uses Luma because its `__NEXT_DATA__` is a clean reference.
 
 ## Layout
 
 ```
 scrape-anything/
 ├── extension/         # Chrome MV3 extension
-└── scrape-backend/    # Rust (axum + sqlx-sqlite + genai) planner service
+├── dashboard/         # Vite + Tailwind + htmx history UI (served by the backend)
+└── scrape-backend/    # Rust (axum + sqlx-sqlite + genai) agent service
 ```
 
 `scrape-backend/SPEC.md` documents the wire protocol and storage schema. Note
@@ -26,9 +30,26 @@ cd scrape-backend
 GEMINI_API_KEY=… cargo run
 ```
 
-Listens on `http://localhost:4546` and creates `scrape.db` next to the binary
-on first run. Set `RUST_LOG=scrape_backend=debug` to see the full Gemini I/O
-per turn; `RUST_LOG=scrape_backend=info` for quieter output.
+Listens on `http://localhost:4546`, serves the dashboard at
+`http://localhost:4546/` (build it first — see below), and creates `scrape.db`
+next to the binary on first run. Set `RUST_LOG=scrape_backend=debug` to see the
+full Gemini I/O per turn; `RUST_LOG=scrape_backend=info` for quieter output.
+
+## Build the dashboard
+
+The dashboard is a small Vite + Tailwind v4 + htmx app; the backend serves its
+static build and renders HTML fragments for it.
+
+```sh
+cd dashboard
+npm install
+npm run build      # produces dashboard/dist/, served at http://localhost:4546/
+```
+
+The backend serves `dashboard/dist` (path configurable via `[dashboard]
+dist_path` in `config.toml`). Open `http://localhost:4546/` to browse past
+sessions, their transcripts, downloadable artifacts, and the per-origin memory
+files.
 
 ## Install the extension
 
@@ -54,36 +75,58 @@ Then:
      declares the `userScripts` permission. We need it because runtime code
      evaluation is otherwise blocked by Chrome and by most pages' CSPs.
 4. Open any web page → click the extension → type what you want extracted →
-   click **Plan & run**.
+   click **Scrape**. Watch the agent's tool steps in the transcript; download
+   the result as JSON/CSV, or browse it later in the dashboard.
 
 ## Flow
+
+The backend runs one LLM step per call and drives a tool loop. **Server-side
+tools** (`list_files`/`read_file`/`write_file`/`edit_file` over the per-origin
+store) are resolved in the backend with no round-trip. **Extension-side tools**
+(`execute_script`, `screenshot`) are handed back to the extension to run in the
+live tab; the extension posts results and the loop resumes.
 
 ```
 [extension]                                            [backend]
    ├── collect DOM signals (dom-signals.js)
-   ├── POST /api/sessions  ───────────────────────────▶
-   │                                                     ├── Gemini writes a
-   │                                                     │   ```js-action``` block
-   ◀──────────  { kind: "code", code, rationale }  ──────┤
-   ├── chrome.userScripts.execute(code)
-   ├── render items + show generated code
-   ├── POST /api/sessions/:id/result  ────────────────▶ (telemetry / cache)
-   └── download JSON / CSV
+   ├── POST /api/sessions  ───────────────────────────▶ agent step (Gemini + tools)
+   │                                                     ├── list/read/write/edit
+   │                                                     │   resolved server-side
+   ◀────────  { kind: "tool_call", tool_calls }  ────────┤ (execute_script / screenshot)
+   ├── run tools in the tab (userScripts / captureVisibleTab)
+   ├── POST /api/sessions/:id/tool_result  ───────────▶ resume; store any {kind,items}
+   │            … loop until …                           artifact
+   ◀────────────  { kind: "message", text }  ────────────┤ terminal summary
+   └── download JSON / CSV (served from the stored artifact)
 ```
 
-The backend persists every session and turn in SQLite. When a session produces
-code, it's cached in the `plans` table keyed by `(host, route_pattern,
-intention_hash)`; future runs against pages on the same route template with
-the same intention can reuse the cached code without another LLM call.
+The backend persists every session and turn in SQLite. Extracted rows are
+upserted into the `artifacts` table (one per session, latest wins). The agent's
+`write_file`/`read_file` calls hit the `origin_files` table, a per-host virtual
+filesystem that persists across sessions — that's how a repeat run on a site
+reuses a scraper or notes it saved earlier.
 
-## Code contract
+## Tools
 
-The model emits a single fenced block:
+| tool | where it runs | purpose |
+|---|---|---|
+| `list_files` / `read_file` / `write_file` / `edit_file` | backend (SQLite) | the agent's persistent per-origin memory |
+| `execute_script` | extension (`chrome.userScripts`) | run JS in the page — probe structure and do the final extraction |
+| `screenshot` | extension (`captureVisibleTab`) | send the page image to Gemini (multimodal) when structure is unclear |
 
-````
-Brief one-line rationale.
+`edit_file` uses exact-once search-and-replace with rich recovery errors (ported
+from the slop coding agent's `edit_ops.rs`).
 
-```js-action
+## Extraction contract
+
+The agent's `execute_script` code is the body of an `async` function (the
+extension wraps it in `(async function(){ … })()` and runs it via
+`chrome.userScripts.execute`). The **final** extraction must
+`return { kind, items }` where `kind` is `"listing"` or `"event"` and `items`
+is an array of plain objects. The last such result becomes the session's
+downloadable artifact.
+
+```js
 const data = JSON.parse(document.getElementById("__NEXT_DATA__").textContent);
 const list = data?.props?.pageProps?.initialData?.data?.entries ?? [];
 const items = list.map((e) => ({
@@ -93,12 +136,6 @@ const items = list.map((e) => ({
 }));
 return { kind: "listing", items };
 ```
-````
-
-The extension wraps the body in an IIFE and runs it through
-`chrome.userScripts.execute`. The block must end with `return { kind, items }`
-where `kind` is `"listing"` or `"event"` and `items` is an array of plain
-objects.
 
 ## Layout details
 
@@ -110,9 +147,11 @@ objects.
   `storage`, `userScripts`, broad host access; declares `dom-signals.js`
   as a `web_accessible_resource` so it ends up in the bundle.
 - `popup.html` / `popup.css` / `popup.js` — the popup UI; drives the
-  collect-signals → POST → run-code → download cycle. Tailwind classes
-  on the static markup; `popup.css` defines a few component classes
-  (`.turn`, `.result-line`) via `@apply` for the JS-built transcript.
+  collect-signals → tool-loop → download cycle. Tailwind classes on the static
+  markup; `popup.css` defines component classes (`.turn`, `.turn.tool`) via
+  `@apply` for the JS-built transcript.
+- `tool-runner.js` — runs the extension-side tools: `execute_script` (via
+  `chrome.userScripts`) and `screenshot` (via `chrome.tabs.captureVisibleTab`).
 - `dom-signals.js` — content script that builds the page fingerprint
   (`__NEXT_DATA__`, JSON-LD, meta, candidate selectors, samples, DOM
   skeleton) under a 240 KB budget.
@@ -120,14 +159,28 @@ objects.
 - `background.js` — empty MV3 service worker.
 - `dist/` — Vite build output. **This is what you load in Chrome.**
 
+### `dashboard/`
+
+- Vite + Tailwind v4 + htmx static app. `index.html` is the shell; the backend
+  renders HTML fragments (`/ui/sessions`, `/ui/sessions/:id`,
+  `/ui/origins/:host/files`) that htmx swaps in. `src/styles.css` uses
+  `@source "../../scrape-backend/src"` so Tailwind scans the Rust `maud`
+  fragments for the utility classes they emit.
+
 ### `scrape-backend/`
 
 - `src/main.rs` — config load, sqlite pool, genai client, axum bind.
-- `src/agent.rs` — single-shot Gemini call, parses the `js-action` fence.
-- `src/session.rs` — session lifecycle, persistence, code cache upsert.
-- `src/routes/sessions.rs` / `src/routes/plans.rs` — HTTP endpoints.
-- `src/prompts/system.md` — the system prompt the model sees.
+- `src/agent.rs` — one function-calling Gemini step; replays the turn log
+  (assistant tool calls, tool responses, screenshot images) into the chat.
+- `src/session.rs` — session lifecycle, the tool loop, artifact upsert.
+- `src/tools.rs` — the 6 `Tool`s + server-side file-store dispatch.
+- `src/edit_ops.rs` — exact-once `string_replace` for `edit_file` (ported from slop).
+- `src/csv.rs` — CSV serializer for artifact downloads.
+- `src/routes/` — `sessions.rs`, `plans.rs`, `data.rs` (list/artifact/files
+  JSON + downloads), `dashboard.rs` (maud fragments).
+- `src/prompts/system.md` — the agent's system prompt.
 - `migrations/0001_initial.sql` — `sessions`, `turns`, `plans` tables.
+- `migrations/0002_agent_store.sql` — `origin_files` (memory) + `artifacts` (rows).
 
 ## Safety notes
 

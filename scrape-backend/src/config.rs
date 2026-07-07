@@ -10,6 +10,24 @@ pub struct Config {
     pub cors: Cors,
     #[serde(default)]
     pub routes: Vec<HostRoutes>,
+    #[serde(default)]
+    pub dashboard: Dashboard,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Dashboard {
+    #[serde(default = "default_dist_path")]
+    pub dist_path: String,
+}
+
+impl Default for Dashboard {
+    fn default() -> Self {
+        Self { dist_path: default_dist_path() }
+    }
+}
+
+fn default_dist_path() -> String {
+    "./dashboard/dist".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]

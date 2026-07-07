@@ -53,10 +53,7 @@ async fn create(State(s): State<AppState>, Json(req): Json<CreateReq>) -> AppRes
 
 #[derive(Deserialize)]
 pub struct ToolResultReq {
-    pub tool_call_id: String,
-    pub result: Value,
-    #[serde(default)]
-    pub error: Option<Value>,
+    pub results: Vec<session::ToolResultItem>,
 }
 
 #[derive(Serialize)]
@@ -67,7 +64,7 @@ async fn tool_result(
     Path(id): Path<String>,
     Json(req): Json<ToolResultReq>,
 ) -> AppResult<Json<TurnResp>> {
-    let turn = session::handle_tool_result(&s, &id, &req.tool_call_id, req.result).await?;
+    let turn = session::handle_tool_result(&s, &id, req.results).await?;
     Ok(Json(TurnResp { turn }))
 }
 
