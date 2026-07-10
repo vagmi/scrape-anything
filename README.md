@@ -37,19 +37,25 @@ full Gemini I/O per turn; `RUST_LOG=scrape_backend=info` for quieter output.
 
 ## Build the dashboard
 
-The dashboard is a small Vite + Tailwind v4 + htmx app; the backend serves its
-static build and renders HTML fragments for it.
+The dashboard is a React Router (framework mode, SPA / `ssr:false`) app with
+Tailwind v4 + shadcn/ui. It consumes the backend's JSON API; the backend serves
+its static build.
 
 ```sh
 cd dashboard
 npm install
-npm run build      # produces dashboard/dist/, served at http://localhost:4546/
+npm run build      # produces dashboard/build/client/, served at http://localhost:4546/
 ```
 
-The backend serves `dashboard/dist` (path configurable via `[dashboard]
-dist_path` in `config.toml`). Open `http://localhost:4546/` to browse past
-sessions, their transcripts, downloadable artifacts, and the per-origin memory
-files.
+The backend serves `dashboard/build/client` (path configurable via
+`[dashboard] dist_path` in `config.toml`), with an `index.html` fallback so
+client-side deep links (`/sessions/:id`, `/origins/:host`) work on refresh. Open
+`http://localhost:4546/` to browse past sessions, their transcripts,
+downloadable artifacts, and the per-origin memory files.
+
+For iterative UI work, `npm run dev` runs the Vite dev server (default
+`http://localhost:5173`) and proxies `/api` → `http://localhost:4546`, so run
+the backend alongside it.
 
 ## Install the extension
 
@@ -161,11 +167,11 @@ return { kind: "listing", items };
 
 ### `dashboard/`
 
-- Vite + Tailwind v4 + htmx static app. `index.html` is the shell; the backend
-  renders HTML fragments (`/ui/sessions`, `/ui/sessions/:id`,
-  `/ui/origins/:host/files`) that htmx swaps in. `src/styles.css` uses
-  `@source "../../scrape-backend/src"` so Tailwind scans the Rust `maud`
-  fragments for the utility classes they emit.
+- React Router v7/v8 framework-mode SPA (`react-router.config.ts` sets
+  `ssr:false`) with Tailwind v4 + shadcn/ui. `app/routes/` holds the pages
+  (`layout` sidebar + search, `session` detail with transcript/tool-steps/
+  artifact downloads, `origin` memory-file browser); `app/lib/api.ts` wraps the
+  backend JSON API. Fonts are bundled (Geist) so it works offline.
 
 ### `scrape-backend/`
 
@@ -177,7 +183,8 @@ return { kind: "listing", items };
 - `src/edit_ops.rs` — exact-once `string_replace` for `edit_file` (ported from slop).
 - `src/csv.rs` — CSV serializer for artifact downloads.
 - `src/routes/` — `sessions.rs`, `plans.rs`, `data.rs` (list/artifact/files
-  JSON + downloads), `dashboard.rs` (maud fragments).
+  JSON + downloads); `mod.rs` also serves the SPA build with an index.html
+  fallback.
 - `src/prompts/system.md` — the agent's system prompt.
 - `migrations/0001_initial.sql` — `sessions`, `turns`, `plans` tables.
 - `migrations/0002_agent_store.sql` — `origin_files` (memory) + `artifacts` (rows).

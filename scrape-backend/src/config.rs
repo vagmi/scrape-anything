@@ -27,7 +27,7 @@ impl Default for Dashboard {
 }
 
 fn default_dist_path() -> String {
-    "./dashboard/dist".to_string()
+    "./dashboard/build/client".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]

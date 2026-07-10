@@ -8,7 +8,6 @@ edition = "2024"
 axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
-maud = "0.26"
 
 # Async
 tokio = { version = "1.49", features = ["full"] }

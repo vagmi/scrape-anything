@@ -17,8 +17,8 @@ request_timeout_secs = 60
 allowed_origins = ["chrome-extension://*"]
 
 [dashboard]
-# Static Vite build served at http://localhost:4546/ (see ../dashboard).
-dist_path = "./dashboard/dist"
+# React Router SPA build served at http://localhost:4546/ (see ../dashboard).
+dist_path = "../dashboard/build/client"
 
 # Per-host route normalization overrides (see SPEC §9).
 [[routes]]
