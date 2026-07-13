@@ -135,6 +135,13 @@ pub async fn handle_tool_result(
         let fn_name = item.tool.clone().unwrap_or_default();
         let (content, image, mime) = if let Some(err) = &item.error {
             (json!({ "error": err }).to_string(), None, None)
+        } else if fn_name == tools::PAGE_TO_MARKDOWN {
+            // The extension returns the raw page HTML. Convert it with pandoc,
+            // SAVE the Markdown to the origin file store, and hand the model
+            // only a small pointer — it navigates the dump with search_file /
+            // read_file rather than paying for the whole page in tokens.
+            let content = page_to_markdown_result(state.db(), session_id, &item.result).await?;
+            (content, None, None)
         } else if let Some(img) = item.result.get("image_base64").and_then(|v| v.as_str()) {
             let mime = item
                 .result
@@ -347,7 +354,92 @@ async fn maybe_store_artifact(db: &SqlitePool, session_id: &str, result: &Value)
     Ok(())
 }
 
+// ───────────────────────── page_to_markdown dumps ───────────────────────────
+
+/// Convert the extension's page HTML to Markdown, persist it under
+/// `dumps/<route-slug>.md` in the origin store, and return the small JSON
+/// pointer the model sees in place of the (potentially huge) content.
+async fn page_to_markdown_result(
+    db: &SqlitePool,
+    session_id: &str,
+    result: &Value,
+) -> AppResult<String> {
+    let html = result.get("html").and_then(|v| v.as_str()).unwrap_or("");
+    let md = match tools::html_to_markdown(html).await {
+        Ok(md) => md,
+        Err(e) => return Ok(json!({ "error": e }).to_string()),
+    };
+
+    // Name the dump after the LIVE page (the extension sends its URL), not the
+    // session's origin route — otherwise every page in a session overwrites the
+    // same file. Fall back to the session route if the URL is missing.
+    let (host, session_route) = session_host_route(db, session_id).await?;
+    let live_url = result.get("url").and_then(|v| v.as_str());
+    let path = dump_path_for(live_url, &session_route);
+
+    // Stamp the source URL at the top so the dump is self-describing (and the
+    // model knows which page it's reading). HTML comment → invisible in render.
+    let source_url = live_url
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| format!("https://{host}{session_route}"));
+    let contents = format!("<!-- source: {source_url} -->\n\n{md}");
+
+    if let Err(e) = tools::write_origin_file(db, &host, &path, &contents).await {
+        return Ok(json!({ "error": format!("converted but could not save: {e}") }).to_string());
+    }
+
+    tracing::info!(
+        target: "scrape_backend::session",
+        %session_id, path = %path, bytes = contents.len(), "page dumped to markdown"
+    );
+    Ok(json!({
+        "saved_to": path,
+        "source": source_url,
+        "bytes": contents.len(),
+        "lines": contents.lines().count(),
+        "note": "Full page saved as Markdown to your file store. Use search_file to locate sections \
+                 and read_file(path, line, limit) to read just those ranges — don't read the whole file.",
+    })
+    .to_string())
+}
+
+/// Derive a stable, readable, per-page dump path. Prefers the live page URL and
+/// appends a short hash of it so distinct pages (or query strings) never collide
+/// — while re-dumping the *same* URL overwrites in place. E.g.
+/// `https://lu.ma/discover?tag=ai` → `dumps/discover-1f3a9c22.md`.
+fn dump_path_for(live_url: Option<&str>, session_route: &str) -> String {
+    // Path component drives the readable slug; the hash key keeps pages distinct.
+    let (route, key) = match live_url.and_then(|u| url_host_and_path(u).ok()) {
+        Some((_, path)) => (path, live_url.unwrap().to_string()),
+        None => (session_route.to_string(), session_route.to_string()),
+    };
+    let mut slug = String::new();
+    let mut prev_dash = false;
+    for c in route.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let slug = if slug.is_empty() { "index" } else { slug };
+    let hash = &hash_hex(&key)[..8];
+    format!("dumps/{slug}-{hash}.md")
+}
+
 // ─────────────────────────── small DB helpers ───────────────────────────────
+
+async fn session_host_route(db: &SqlitePool, session_id: &str) -> AppResult<(String, String)> {
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT host, route FROM sessions WHERE id = ?1")
+            .bind(session_id)
+            .fetch_optional(db)
+            .await?;
+    row.ok_or(AppError::SessionNotFound)
+}
 
 async fn session_host(db: &SqlitePool, session_id: &str) -> AppResult<String> {
     let row: Option<(String,)> = sqlx::query_as("SELECT host FROM sessions WHERE id = ?1")
