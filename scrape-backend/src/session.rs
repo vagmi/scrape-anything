@@ -9,7 +9,10 @@
 //! replies with plain text (no tool calls).
 //!
 //! Extracted rows (an `execute_script` result shaped `{ kind, items }`) are
-//! upserted into the `artifacts` table and serve the JSON/CSV downloads.
+//! upserted into the `artifacts` table and serve the JSON/CSV downloads. With
+//! `append: true` the rows are merged onto what the session already collected
+//! instead of replacing it, so a listing spread over several pages survives the
+//! navigations between them — the session itself is durable and never restarts.
 
 use anyhow::Result;
 use chrono::Utc;
@@ -320,7 +323,13 @@ async fn advance(state: &AppState, session_id: &str) -> AppResult<Turn> {
 // ───────────────────────────── artifacts ────────────────────────────────────
 
 /// If a tool result looks like an extraction (`{ kind, items:[…] }` with a
-/// non-empty array), upsert it as the session's artifact (latest wins).
+/// non-empty array), upsert it as the session's artifact.
+///
+/// By default the latest extraction replaces the artifact. With `append: true`
+/// the new rows are merged onto the ones already collected in this session
+/// (duplicates dropped) — that is what lets one session gather a listing that
+/// spans several pages, where each page is a separate `execute_script` run
+/// because navigating tears the previous page's context down.
 async fn maybe_store_artifact(db: &SqlitePool, session_id: &str, result: &Value) -> AppResult<()> {
     let Some(items) = result.get("items").and_then(|v| v.as_array()) else {
         return Ok(());
@@ -328,6 +337,14 @@ async fn maybe_store_artifact(db: &SqlitePool, session_id: &str, result: &Value)
     if items.is_empty() {
         return Ok(());
     }
+    let append = result.get("append").and_then(|v| v.as_bool()).unwrap_or(false);
+    let items = if append {
+        merge_items(existing_items(db, session_id).await?, items)
+    } else {
+        items.clone()
+    };
+    let items = &items;
+
     let kind = result.get("kind").and_then(|v| v.as_str()).unwrap_or("listing").to_string();
     let items_json = serde_json::to_string(items).unwrap_or_else(|_| "[]".into());
     let now = Utc::now().timestamp_millis();
@@ -350,8 +367,54 @@ async fn maybe_store_artifact(db: &SqlitePool, session_id: &str, result: &Value)
     .bind(now)
     .execute(db)
     .await?;
-    tracing::info!(target: "scrape_backend::session", %session_id, items = items.len(), kind = %kind, "artifact stored");
+    tracing::info!(
+        target: "scrape_backend::session",
+        %session_id, items = items.len(), kind = %kind, append, "artifact stored"
+    );
     Ok(())
+}
+
+/// Rows already collected for this session, or an empty vec if there are none.
+async fn existing_items(db: &SqlitePool, session_id: &str) -> AppResult<Vec<Value>> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT items_json FROM artifacts WHERE session_id = ?1")
+            .bind(session_id)
+            .fetch_optional(db)
+            .await?;
+    Ok(row
+        .and_then(|(json,)| serde_json::from_str::<Vec<Value>>(&json).ok())
+        .unwrap_or_default())
+}
+
+/// Append `incoming` onto `existing`, skipping rows already present. Identity is
+/// the row's canonical JSON, so a page re-scraped after a navigation (or an
+/// overlapping pagination window) doesn't duplicate what we already have.
+fn merge_items(mut existing: Vec<Value>, incoming: &[Value]) -> Vec<Value> {
+    let mut seen: std::collections::HashSet<String> =
+        existing.iter().map(canonical_key).collect();
+    for item in incoming {
+        if seen.insert(canonical_key(item)) {
+            existing.push(item.clone());
+        }
+    }
+    existing
+}
+
+/// Order-independent identity for a row: objects are keyed by their sorted
+/// field/value pairs, so `{a,b}` and `{b,a}` are the same row.
+fn canonical_key(v: &Value) -> String {
+    match v {
+        Value::Object(map) => {
+            let mut pairs: Vec<String> =
+                map.iter().map(|(k, val)| format!("{k}\u{1}{}", canonical_key(val))).collect();
+            pairs.sort();
+            format!("{{{}}}", pairs.join("\u{2}"))
+        }
+        Value::Array(arr) => {
+            format!("[{}]", arr.iter().map(canonical_key).collect::<Vec<_>>().join("\u{2}"))
+        }
+        other => other.to_string(),
+    }
 }
 
 // ───────────────────────── page_to_markdown dumps ───────────────────────────
@@ -564,4 +627,86 @@ fn url_host_and_path(input: &str) -> Result<(String, String), &'static str> {
 
 fn truncate_for_log(s: &str, max: usize) -> String {
     if s.len() <= max { s.to_string() } else { format!("{}…[+{} chars]", &s[..max], s.len() - max) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(a: &str, b: i64) -> Value {
+        json!({ "title": a, "n": b })
+    }
+
+    #[test]
+    fn append_merges_and_drops_duplicates() {
+        let existing = vec![row("a", 1), row("b", 2)];
+        let incoming = vec![row("b", 2), row("c", 3)];
+        let merged = merge_items(existing, &incoming);
+        assert_eq!(merged, vec![row("a", 1), row("b", 2), row("c", 3)]);
+    }
+
+    #[test]
+    fn field_order_does_not_make_a_new_row() {
+        let a: Value = serde_json::from_str(r#"{"x":1,"y":2}"#).unwrap();
+        let b: Value = serde_json::from_str(r#"{"y":2,"x":1}"#).unwrap();
+        assert_eq!(canonical_key(&a), canonical_key(&b));
+        assert_eq!(merge_items(vec![a], &[b]).len(), 1);
+    }
+
+    /// End-to-end over a real (temp) DB: two `append: true` extractions from
+    /// two different pages land in one artifact, the way a paginated run works.
+    #[tokio::test]
+    async fn appending_across_pages_accumulates_one_artifact() {
+        let dir = std::env::temp_dir().join(format!("scrape-test-{}", Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("t.db");
+        let db = crate::db::open(db_path.to_str().unwrap()).await.unwrap();
+
+        let sid = Ulid::new().to_string();
+        sqlx::query(
+            "INSERT INTO sessions (id, url, host, route, intention, intention_hash, status, created_at, updated_at)
+             VALUES (?1, 'https://x.test/p1', 'x.test', '/p1', 'jobs', 'h', 'active', 0, 0)",
+        )
+        .bind(&sid)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let page1 = json!({ "kind": "listing", "append": true, "items": [row("a", 1), row("b", 2)] });
+        let page2 = json!({ "kind": "listing", "append": true, "items": [row("b", 2), row("c", 3)] });
+        maybe_store_artifact(&db, &sid, &page1).await.unwrap();
+        maybe_store_artifact(&db, &sid, &page2).await.unwrap();
+
+        let (count, items_json): (i64, String) =
+            sqlx::query_as("SELECT item_count, items_json FROM artifacts WHERE session_id = ?1")
+                .bind(&sid)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(count, 3, "page 2 should add only the row page 1 didn't have");
+        let items: Vec<Value> = serde_json::from_str(&items_json).unwrap();
+        assert_eq!(items, vec![row("a", 1), row("b", 2), row("c", 3)]);
+
+        // Without `append`, the next extraction still replaces outright.
+        let replace = json!({ "kind": "listing", "items": [row("z", 9)] });
+        maybe_store_artifact(&db, &sid, &replace).await.unwrap();
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT item_count FROM artifacts WHERE session_id = ?1")
+                .bind(&sid)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+
+        db.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn similar_rows_stay_distinct() {
+        let a = row("a", 1);
+        let b = row("a", 2);
+        assert_ne!(canonical_key(&a), canonical_key(&b));
+        assert_eq!(merge_items(vec![a], &[b]).len(), 2);
+    }
 }

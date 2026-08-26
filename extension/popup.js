@@ -8,7 +8,6 @@ const MAX_TOOL_ITERATIONS = 60; // client guard mirroring the backend max_turns
 const state = {
   tabId: null,
   sessionId: null,
-  contentScriptsInjected: false,
   artifactId: null,
   toolEls: new Map(), // call_id -> tool bubble element
 };
@@ -66,14 +65,15 @@ async function getActiveTab() {
   return tab;
 }
 
-async function ensureSignalsScript(tabId) {
-  if (state.contentScriptsInjected) return;
+// Injected fresh every time: a navigation wipes the content script out of the
+// page, and the agent moves between pages inside a single session, so a cached
+// "already injected" flag would go stale the moment it navigated.
+async function injectSignalsScript(tabId) {
   await chrome.scripting.executeScript({ target: { tabId }, files: ["dom-signals.js"] });
-  state.contentScriptsInjected = true;
 }
 
 async function collectSignals(tabId) {
-  await ensureSignalsScript(tabId);
+  await injectSignalsScript(tabId);
   const [{ result } = {}] = await chrome.scripting.executeScript({
     target: { tabId },
     func: () => window.__scrape.signals(),
@@ -101,8 +101,12 @@ function appendAssistantMessage(text) {
   scrollTranscript();
 }
 
-/// A tool-call bubble. `call` is { call_id, tool, args }.
+/// A tool-call bubble. `call` is { call_id, tool, args }. Returns the existing
+/// bubble if this call already has one — a resumed session re-runs calls that
+/// were rendered while restoring the transcript.
 function appendToolCallBubble(call) {
+  const existing = state.toolEls.get(call.call_id);
+  if (existing) return existing;
   const el = document.createElement("div");
   el.className = "turn tool";
   el.dataset.callId = call.call_id;
@@ -116,11 +120,14 @@ function appendToolCallBubble(call) {
 
   const detailText = call.tool === "execute_script"
     ? (call.args?.code ?? "")
-    : JSON.stringify(call.args ?? {}, null, 2);
+    : call.tool === "navigate"
+      ? (call.args?.url ?? "")
+      : JSON.stringify(call.args ?? {}, null, 2);
   if (detailText && detailText !== "{}") {
     const details = document.createElement("details");
     const summary = document.createElement("summary");
-    summary.textContent = call.tool === "execute_script" ? "code" : "args";
+    summary.textContent =
+      call.tool === "execute_script" ? "code" : call.tool === "navigate" ? "url" : "args";
     const pre = document.createElement("pre");
     pre.textContent = detailText;
     details.appendChild(summary);
@@ -146,6 +153,8 @@ function setToolStatus(callId, text, isError) {
 function toolIcon(tool) {
   if (tool === "screenshot") return "📷";
   if (tool === "execute_script") return "⚙️";
+  if (tool === "navigate") return "🧭";
+  if (tool === "page_to_markdown") return "📄";
   return "🔧";
 }
 
@@ -166,16 +175,7 @@ async function runToolLoop(turn) {
       setStatus("Too many tool steps; stopping.", "error");
       return;
     }
-    const results = [];
-    for (const call of current.tool_calls) {
-      appendToolCallBubble(call);
-      setStatus(`Running ${call.tool}…`);
-      const r = await runTool(state.tabId, call);
-      setToolStatus(call.call_id, describeResult(call.tool, r), !!r.error);
-      results.push(r);
-    }
-    const { turn: next } = await backend.sendToolResult(state.sessionId, results);
-    current = next;
+    current = await runCallsAndContinue(current.tool_calls);
   }
 
   if (current && current.kind === "message") {
@@ -185,12 +185,33 @@ async function runToolLoop(turn) {
   setStatus("Done.", "ok");
 }
 
+/// Run one batch of extension-side tool calls, post the results, and return the
+/// backend's next turn. Tools can navigate the tab; `state.tabId` stays fixed
+/// and the session on the backend carries straight on into the new page.
+async function runCallsAndContinue(calls) {
+  const results = [];
+  for (const call of calls) {
+    appendToolCallBubble(call);
+    setStatus(`Running ${call.tool}…`);
+    const r = await runTool(state.tabId, call);
+    setToolStatus(call.call_id, describeResult(call.tool, r), !!r.error);
+    results.push(r);
+  }
+  const { turn: next } = await backend.sendToolResult(state.sessionId, results);
+  return next;
+}
+
 function describeResult(tool, r) {
   if (r.error) return `error: ${r.error}`;
+  if (r.result?.navigated) return `page navigated → ${shortUrl(r.result.to)}`;
+  if (tool === "navigate") return `→ ${shortUrl(r.result?.url)}`;
   if (tool === "screenshot") return "captured";
   if (tool === "execute_script") {
     const items = r.result?.items;
-    if (Array.isArray(items)) return `${items.length} item${items.length === 1 ? "" : "s"}`;
+    if (Array.isArray(items)) {
+      const n = `${items.length} item${items.length === 1 ? "" : "s"}`;
+      return r.result.append ? `+${n}` : n;
+    }
     return "ran";
   }
   return "done";
@@ -282,6 +303,11 @@ async function restoreSession(sessionId) {
   // The opening intention lives on sessions.intention, not as a turn.
   if (info.intention) appendUserTurn(info.intention);
 
+  // Tool calls the backend handed out but never got an answer for. The popup
+  // closes whenever it loses focus, which can happen mid-step; without this the
+  // session would sit waiting forever on a call nobody is going to run.
+  const unanswered = new Map();
+
   for (const t of info.turns) {
     if (t.role === "extension") continue; // signals / result telemetry
     if (t.role === "user" && t.kind === "message") {
@@ -291,7 +317,9 @@ async function restoreSession(sessionId) {
       const calls = p.tool_calls || [];
       if (calls.length) {
         for (const c of calls) {
-          appendToolCallBubble({ call_id: c.call_id, tool: c.fn_name, args: c.fn_arguments });
+          const call = { call_id: c.call_id, tool: c.fn_name, args: c.fn_arguments };
+          appendToolCallBubble(call);
+          unanswered.set(c.call_id, call);
         }
       } else if (p.text) {
         appendAssistantMessage(p.text);
@@ -300,11 +328,40 @@ async function restoreSession(sessionId) {
       const p = t.payload || {};
       const { text, err } = restoreToolSummary(p);
       setToolStatus(p.call_id, text, err);
+      unanswered.delete(p.call_id);
     }
   }
   scrollTranscript();
   await refreshArtifact();
-  setStatus(`Restored session.`, "");
+
+  const pending = [...unanswered.values()];
+  if (info.status === "active" && pending.length) {
+    await resumePendingCalls(pending);
+  } else {
+    setStatus("Restored session.", "");
+  }
+}
+
+/// Finish a step that was interrupted: re-run the tools the backend is still
+/// waiting on against the tab as it is now, then carry the loop on. The page may
+/// well have moved since — that's fine, the tools report where they landed and
+/// the agent re-orients from there.
+async function resumePendingCalls(calls) {
+  const tab = await getActiveTab();
+  if (!tab?.url || !/^https?:\/\//.test(tab.url)) {
+    setStatus("Session paused mid-step — open a web page to resume it.", "error");
+    return;
+  }
+  state.tabId = tab.id;
+  $("send").disabled = true;
+  try {
+    setStatus("Resuming the interrupted step…");
+    await runToolLoop(await runCallsAndContinue(calls));
+  } catch (e) {
+    setStatus(e.message || String(e), "error");
+  } finally {
+    $("send").disabled = false;
+  }
 }
 
 function restoreToolSummary(p) {
@@ -320,6 +377,7 @@ function restoreToolSummary(p) {
 }
 
 function shortUrl(url) {
+  if (!url) return "";
   try { const u = new URL(url); return u.host + u.pathname; } catch { return url; }
 }
 

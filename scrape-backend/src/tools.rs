@@ -1,11 +1,13 @@
 //! Tool catalog for the function-calling agent.
 //!
-//! Six tools, two classes:
+//! Two classes of tool:
 //!   - **Server-side** (`list_files`, `read_file`, `write_file`, `edit_file`) —
 //!     resolved here against the per-origin SQLite file store (`origin_files`),
 //!     no extension round-trip. This is the agent's persistent memory.
-//!   - **Extension-side** (`execute_script`, `screenshot`) — run in the live tab
-//!     by the extension; `agent.rs` / `session.rs` route these back over HTTP.
+//!   - **Extension-side** (`execute_script`, `screenshot`, `page_to_markdown`,
+//!     `navigate`) — run in the live tab by the extension; `agent.rs` /
+//!     `session.rs` route these back over HTTP. The backend session outlives any
+//!     page navigation, so `navigate` moves the tab without ending the run.
 //!
 //! The file-tool argument names and `edit_file`'s exact-once semantics mirror
 //! the slop coding agent (`references/slop/slop-agent/src/tools/`); the edit
@@ -29,6 +31,7 @@ pub const CONCAT_FILES: &str = "concat_files";
 pub const EXECUTE_SCRIPT: &str = "execute_script";
 pub const SCREENSHOT: &str = "screenshot";
 pub const PAGE_TO_MARKDOWN: &str = "page_to_markdown";
+pub const NAVIGATE: &str = "navigate";
 
 /// Tools that the backend resolves itself (against `origin_files`) without
 /// handing control back to the extension.
@@ -137,7 +140,12 @@ pub fn catalog() -> Vec<Tool> {
                 "Run JavaScript in the live page and get its return value back. The code is the body of an \
                  async function with access to document/window/location. Use it to probe structure and to \
                  perform the final extraction — end with `return { kind, items }` where kind is \"listing\" or \
-                 \"event\" and items is an array of plain objects. The last such result becomes the saved artifact.",
+                 \"event\" and items is an array of plain objects. The last such result becomes the saved artifact, \
+                 UNLESS you add `append: true` — then its items are merged into the rows collected so far in \
+                 this session (duplicates dropped), which is how you gather a listing that spans several pages. \
+                 The script dies if the page navigates while it runs, so never click a link or a pagination \
+                 control here — extract this page, then use the `navigate` tool. If a navigation does happen \
+                 mid-run you get back `{ navigated: true, from, to }` instead of your return value.",
             )
             .with_schema(json!({
                 "type": "object",
@@ -167,6 +175,23 @@ pub fn catalog() -> Vec<Tool> {
             .with_schema(json!({
                 "type": "object",
                 "properties": {}
+            })),
+        Tool::new(NAVIGATE)
+            .with_description(
+                "Navigate the live tab to another URL and wait for the new page to finish loading.                  Returns `{ url, title }` for the page you landed on. THIS IS THE ONLY SAFE WAY TO CHANGE                  PAGES: your session survives navigation, but an `execute_script` context does not — a script                  that clicks a link or a pagination control is killed mid-run and everything it held in                  memory is lost. So never navigate from inside `execute_script`. Instead: extract the                  current page (with `append: true`), call `navigate` with the next page's URL, extract again.                  Relative URLs are resolved against the current page; only http(s) URLs are allowed.",
+            )
+            .with_schema(json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "Absolute or page-relative URL to load." },
+                    "wait_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 15000,
+                        "description": "Extra settle time after load, for pages that hydrate late (default 500)."
+                    }
+                },
+                "required": ["url"]
             })),
     ]
 }
