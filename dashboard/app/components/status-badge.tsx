@@ -8,6 +8,8 @@ const STYLES: Record<string, string> = {
     "border-transparent bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300",
   gave_up:
     "border-transparent bg-rose-100 text-rose-800 dark:bg-rose-500/15 dark:text-rose-300",
+  cancelled:
+    "border-transparent bg-stone-200 text-stone-700 dark:bg-stone-500/15 dark:text-stone-300",
 };
 
 export function StatusBadge({ status }: { status: string }) {

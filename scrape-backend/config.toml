@@ -7,7 +7,7 @@ path = "./scrape.db"
 
 [llm]
 provider = "gemini"
-model = "gemini-3-flash-preview"
+model = "gemini-3.6-flash"
 # GEMINI_API_KEY is read from the environment, not this file.
 max_turns = 50
 max_refinements = 3

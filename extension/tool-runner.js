@@ -12,19 +12,31 @@
 // a silent `null`.
 
 /// Run one tool call. Always resolves; failures come back as { error } so the
-/// agent can see and react to them.
-export async function runTool(tabId, call) {
+/// agent can see and react to them. `onProgress` receives human-readable
+/// status updates for long waits (navigate / tab settle / LLM round-trip).
+/// A 60s overall cap guarantees we never hang the popup transcript forever.
+export async function runTool(tabId, call, onProgress) {
   const { call_id, tool, args } = call;
+  const progress = (m) => { try { onProgress?.(m); } catch {} };
   try {
     let result;
+    const capped = (p, label) =>
+      Promise.race([
+        p,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`${label} timed out after 60s`)), 60000)),
+      ]);
     if (tool === "execute_script") {
-      result = await withPageReady(tabId, () => executeScriptAcrossNav(tabId, args?.code ?? ""));
+      result = await capped(
+        withPageReady(tabId, () => executeScriptAcrossNav(tabId, args?.code ?? ""), progress),
+        tool,
+      );
     } else if (tool === "navigate") {
-      result = await navigate(tabId, args?.url, args?.wait_ms);
+      result = await capped(navigate(tabId, args?.url, args?.wait_ms, progress), tool);
     } else if (tool === "screenshot") {
-      result = await withPageReady(tabId, () => screenshot());
+      result = await capped(withPageReady(tabId, () => screenshot(), progress), tool);
     } else if (tool === "page_to_markdown") {
-      result = await withPageReady(tabId, () => pageHtml(tabId));
+      result = await capped(withPageReady(tabId, () => pageHtml(tabId), progress), tool);
     } else {
       throw new Error(`unknown extension tool: ${tool}`);
     }
@@ -43,14 +55,17 @@ const TRANSIENT_NAV_RE =
 /// Run an extension-side tool only once the tab has finished loading. On a
 /// transient navigation error, wait for the (likely new) page to settle and
 /// retry once — this is what keeps a session alive across in-page navigation.
-async function withPageReady(tabId, fn) {
-  await waitForTabReady(tabId);
+async function withPageReady(tabId, fn, onProgress) {
+  const progress = (m) => { try { onProgress?.(m); } catch {} };
+  progress("Waiting for page to settle…");
+  await waitForTabReady(tabId, 10000);
   try {
     return await fn();
   } catch (e) {
     const msg = e?.message || String(e);
     if (TRANSIENT_NAV_RE.test(msg)) {
-      await waitForTabReady(tabId);
+      progress("Page moved mid-step — waiting for new page…");
+      await waitForTabReady(tabId, 10000);
       return await fn();
     }
     throw e;
@@ -61,7 +76,7 @@ async function withPageReady(tabId, fn) {
 /// common failure: acting on a tab that navigated to a 404/error page or is
 /// still loading. Never rejects on timeout — it lets the actual tool call
 /// surface a precise error instead.
-async function waitForTabReady(tabId, timeoutMs = 15000) {
+async function waitForTabReady(tabId, timeoutMs = 10000) {
   const tab = await waitUntilComplete(tabId, timeoutMs);
   assertScriptableUrl(tab.url);
 }
@@ -70,7 +85,7 @@ async function waitForTabReady(tabId, timeoutMs = 15000) {
 /// says nothing about whether scripts can run there — `navigate` uses it because
 /// navigating *away* from an unscriptable page (a chrome-error:// dead link, say)
 /// is exactly how the agent gets unstuck.
-async function waitUntilComplete(tabId, timeoutMs = 15000) {
+async function waitUntilComplete(tabId, timeoutMs = 10000) {
   let tab;
   try {
     tab = await chrome.tabs.get(tabId);
@@ -177,13 +192,15 @@ function watchNavigation(tabId) {
 /// Move the tab to `url` and resolve once the new page has loaded. This is the
 /// agent's supported way to change pages: the backend session is untouched, so
 /// the next tool call simply runs against the new document.
-async function navigate(tabId, url, waitMs) {
+async function navigate(tabId, url, waitMs, onProgress) {
   if (!url || typeof url !== "string") throw new Error("`url` is required");
+  const progress = (m) => { try { onProgress?.(m); } catch {} };
   // Settle any load already in flight first. Otherwise its `complete` event
   // arrives after we start ours and we'd take it for our own, handing the agent
   // the page it was leaving. It also makes `current` the real base for a
   // relative URL.
-  const current = (await waitUntilComplete(tabId)).url ?? null;
+  progress("Settling current page…");
+  const current = (await waitUntilComplete(tabId, 10000)).url ?? null;
   let target;
   try {
     target = current ? new URL(url, current).href : new URL(url).href;
@@ -193,12 +210,16 @@ async function navigate(tabId, url, waitMs) {
   assertScriptableUrl(target);
 
   // Listener first: tabs.update can complete the load before we could attach it.
-  const loaded = waitForLoad(tabId, target);
+  progress(`Navigating to ${target}…`);
+  const loaded = waitForLoad(tabId, target, 15000, progress);
   await chrome.tabs.update(tabId, { url: target });
   await loaded;
 
   const settle = Math.min(Math.max(Number(waitMs ?? 500) || 0, 0), 15000);
-  if (settle) await sleep(settle);
+  if (settle) {
+    progress("Waiting for page to settle…");
+    await sleep(settle);
+  }
 
   const tab = await chrome.tabs.get(tabId);
   assertScriptableUrl(tab.url);
@@ -209,11 +230,13 @@ async function navigate(tabId, url, waitMs) {
 /// navigation as loading→complete, but a same-URL or fragment-only navigation
 /// may report nothing at all — so if no event arrives shortly after the update,
 /// fall back to polling the tab's own state.
-function waitForLoad(tabId, target, timeoutMs = 30000) {
+function waitForLoad(tabId, target, timeoutMs = 15000, onProgress) {
   return new Promise((resolve) => {
     let started = false;
     let settled = false;
     let timer, poll;
+    const startedAt = Date.now();
+    const progress = (m) => { try { onProgress?.(m); } catch {} };
     const finish = () => {
       if (settled) return;
       settled = true;
@@ -227,18 +250,32 @@ function waitForLoad(tabId, target, timeoutMs = 30000) {
     // a redirect still counts as arrival.
     function listener(updatedId, info) {
       if (updatedId !== tabId) return;
-      if (info.status === "loading" || info.url) started = true;
-      else if (info.status === "complete" && started) finish();
+      if (info.status === "loading" || info.url) {
+        started = true;
+        progress("Page loading…");
+      } else if (info.status === "complete" && started) finish();
     }
     chrome.tabs.onUpdated.addListener(listener);
-    timer = setTimeout(finish, timeoutMs);
-    // No load ever started and the tab already sits complete on the target → the
-    // navigation was a no-op (same URL, or hash only). Don't wait out the clock.
+    timer = setTimeout(() => {
+      progress("Load wait timed out — continuing with current page…");
+      finish();
+    }, timeoutMs);
+    // No load ever started: finish early once the tab looks stable. Accept any
+    // complete page after ~2s (covers instant loads and redirect races where we
+    // missed the loading event); exact-URL match finishes immediately.
+    // Without this, a redirect that skips our listener would wait out the full
+    // timeout with a frozen transcript.
     poll = setInterval(async () => {
       if (started) return;
       try {
         const t = await chrome.tabs.get(tabId);
-        if (t.status === "complete" && sameDocument(t.url, target)) finish();
+        if (t.status !== "complete") return;
+        if (sameDocument(t.url, target)) {
+          finish();
+        } else if (Date.now() - startedAt > 2000) {
+          // Already stable on some page (redirect / no-op) — don't hang.
+          finish();
+        }
       } catch {
         finish(); // tab gone; the caller's tabs.get will report it properly
       }

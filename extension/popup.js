@@ -10,6 +10,8 @@ const state = {
   sessionId: null,
   artifactId: null,
   toolEls: new Map(), // call_id -> tool bubble element
+  running: false, // an agent loop is driving tools right now
+  stopRequested: false, // user hit Stop; loop checks this between steps
 };
 
 // ─────────────────────────── UI helpers ─────────────────────────────────────
@@ -25,10 +27,15 @@ function show(id) { $(id).classList.remove("hidden"); }
 function resetUiForNew() {
   state.sessionId = null;
   state.artifactId = null;
+  state.running = false;
+  state.stopRequested = false;
   state.toolEls.clear();
   $("transcript").innerHTML = "";
   hide("transcript");
   hide("results");
+  hide("stop");
+  $("stop").disabled = false;
+  $("send").disabled = false;
   $("dl-json").disabled = true;
   $("dl-csv").disabled = true;
   $("composer-label").textContent = "What do you want extracted?";
@@ -167,10 +174,12 @@ function scrollTranscript() {
 
 /// Given a turn from the backend, run any tools it asks for and post the
 /// results back, looping until the agent returns a terminal message.
+/// Checks `state.stopRequested` between steps so the Stop button breaks out
+/// promptly; the backend session is marked cancelled separately.
 async function runToolLoop(turn) {
   let current = turn;
   let guard = 0;
-  while (current && current.kind === "tool_call") {
+  while (current && current.kind === "tool_call" && !state.stopRequested) {
     if (++guard > MAX_TOOL_ITERATIONS) {
       setStatus("Too many tool steps; stopping.", "error");
       return;
@@ -178,6 +187,10 @@ async function runToolLoop(turn) {
     current = await runCallsAndContinue(current.tool_calls);
   }
 
+  if (state.stopRequested) {
+    await refreshArtifact();
+    return;
+  }
   if (current && current.kind === "message") {
     appendAssistantMessage(current.text);
   }
@@ -189,15 +202,42 @@ async function runToolLoop(turn) {
 /// backend's next turn. Tools can navigate the tab; `state.tabId` stays fixed
 /// and the session on the backend carries straight on into the new page.
 async function runCallsAndContinue(calls) {
+  // If the popup was restored without a tab (e.g. after a restart), follow the
+  // user's current tab rather than failing on a stale/null id.
+  if (!state.tabId) {
+    const tab = await getActiveTab().catch(() => null);
+    if (tab?.id) state.tabId = tab.id;
+  }
+  if (!state.tabId) throw new Error("No active tab — open a web page first.");
   const results = [];
   for (const call of calls) {
+    if (state.stopRequested) break;
     appendToolCallBubble(call);
     setStatus(`Running ${call.tool}…`);
-    const r = await runTool(state.tabId, call);
+    const r = await runTool(state.tabId, call, (m) => {
+      if (!state.stopRequested) setStatus(`${call.tool}: ${m}`);
+    });
     setToolStatus(call.call_id, describeResult(call.tool, r), !!r.error);
     results.push(r);
   }
+  if (state.stopRequested) {
+    // Don't post partial results — that would advance the agent loop. Just
+    // tell the backend to stand down (best-effort; an in-flight request may
+    // re-mark the session active, so cancel lands last and wins).
+    setStatus("Stopping…");
+    try { await backend.cancelSession(state.sessionId); } catch {}
+    await refreshArtifact();
+    setStatus("Stopped.", "");
+    return { kind: "message", text: "Stopped.", turn_index: -1 };
+  }
+  setStatus("Thinking… (agent step running)");
   const { turn: next } = await backend.sendToolResult(state.sessionId, results);
+  if (state.stopRequested) {
+    try { await backend.cancelSession(state.sessionId); } catch {}
+    await refreshArtifact();
+    setStatus("Stopped.", "");
+    return { kind: "message", text: "Stopped.", turn_index: -1 };
+  }
   return next;
 }
 
@@ -242,6 +282,7 @@ function downloadArtifact(format) {
 // ─────────────────────────── handlers ──────────────────────────────────────
 
 async function onSend() {
+  if (state.running) return;
   const text = $("message").value.trim();
   if (!text) { setStatus("Type something first.", "error"); return; }
   const tab = await getActiveTab();
@@ -251,6 +292,10 @@ async function onSend() {
   state.tabId = tab.id;
 
   $("send").disabled = true;
+  state.running = true;
+  state.stopRequested = false;
+  $("stop").disabled = false;
+  show("stop");
   $("message").value = "";
 
   try {
@@ -271,14 +316,38 @@ async function onSend() {
       turn = res.turn;
     }
     await runToolLoop(turn);
+    if (!state.stopRequested && state.sessionId) {
+      // runToolLoop reports Done itself; nothing to do here.
+    }
   } catch (e) {
-    setStatus(e.message || String(e), "error");
+    if (!state.stopRequested) setStatus(e.message || String(e), "error");
   } finally {
+    state.running = false;
+    hide("stop");
     $("send").disabled = false;
   }
 }
 
+/// Stop button: signal the loop to stand down between steps and mark the
+/// backend session cancelled so reopening the popup doesn't auto-resume it.
+/// Sending another message afterwards revives the session.
+async function onStop() {
+  if (!state.sessionId) return;
+  state.stopRequested = true;
+  $("stop").disabled = true;
+  setStatus("Stopping…");
+  try { await backend.cancelSession(state.sessionId); } catch (e) {
+    setStatus(`Stop failed (${e.message || e}) — closing the popup also halts the run.`, "error");
+  }
+}
+
 async function onNewSession() {
+  // Stand down the current run first so its loop can't keep posting results.
+  state.stopRequested = true;
+  if (state.sessionId) {
+    try { await backend.cancelSession(state.sessionId); } catch {}
+  }
+  state.running = false;
   await clearActiveSession();
   resetUiForNew();
   await detectPage();
@@ -335,8 +404,17 @@ async function restoreSession(sessionId) {
   await refreshArtifact();
 
   const pending = [...unanswered.values()];
-  if (info.status === "active" && pending.length) {
+  if (info.status === "cancelled") {
+    setStatus("Stopped.", "");
+  } else if (info.status === "active" && pending.length) {
     await resumePendingCalls(pending);
+  } else if (info.status === "active" && !pending.length) {
+    // Stuck case: the popup died during POST /tool_result. The backend already
+    // stored our tool_response and advanced (or was cancelled mid-LLM), so
+    // there is no unanswered ToolCall to re-run — but the session is still
+    // active with no driver. Kicking with an empty result re-runs advance()
+    // and hands us the next turn instead of sitting frozen on "Restored".
+    await resumeStuckSession();
   } else {
     setStatus("Restored session.", "");
   }
@@ -354,12 +432,47 @@ async function resumePendingCalls(calls) {
   }
   state.tabId = tab.id;
   $("send").disabled = true;
+  state.running = true;
+  state.stopRequested = false;
+  $("stop").disabled = false;
+  show("stop");
   try {
     setStatus("Resuming the interrupted step…");
     await runToolLoop(await runCallsAndContinue(calls));
   } catch (e) {
-    setStatus(e.message || String(e), "error");
+    if (!state.stopRequested) setStatus(e.message || String(e), "error");
   } finally {
+    state.running = false;
+    hide("stop");
+    $("send").disabled = false;
+  }
+}
+
+/// Recover an `active` session with no unanswered calls (popup died during the
+/// POST, so the backend consumed our results but we never got the next turn).
+/// An empty `results: []` just re-runs `advance()` server-side — no duplicate
+/// tool execution — and returns whatever the agent wants next.
+async function resumeStuckSession() {
+  const tab = await getActiveTab().catch(() => null);
+  if (tab?.id) state.tabId = tab.id;
+  if (!tab?.url || !/^https?:\/\//.test(tab.url)) {
+    setStatus("Session is active but paused — open a web page and hit Send to resume.", "error");
+    return;
+  }
+  $("send").disabled = true;
+  state.running = true;
+  state.stopRequested = false;
+  $("stop").disabled = false;
+  show("stop");
+  try {
+    setStatus("Resuming interrupted session…");
+    const { turn } = await backend.sendToolResult(state.sessionId, []);
+    await runToolLoop(turn);
+  } catch (e) {
+    if (!state.stopRequested) setStatus(`Resume failed (${e.message || e}) — hit Send to retry.`, "error");
+  } finally {
+    state.running = false;
+    hide("stop");
     $("send").disabled = false;
   }
 }
@@ -389,6 +502,7 @@ async function detectPage() {
 
 document.addEventListener("DOMContentLoaded", async () => {
   $("send").addEventListener("click", onSend);
+  $("stop").addEventListener("click", onStop);
   $("new-session").addEventListener("click", onNewSession);
   $("dl-json").addEventListener("click", () => downloadArtifact("json"));
   $("dl-csv").addEventListener("click", () => downloadArtifact("csv"));

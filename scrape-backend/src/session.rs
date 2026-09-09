@@ -134,6 +134,13 @@ pub async fn handle_tool_result(
 ) -> AppResult<Turn> {
     session_must_exist(state.db(), session_id).await?;
 
+    // Stop wins over stray late results (e.g. the popup posted a batch it had
+    // already started before the user hit Stop). Don't advance the loop.
+    if session_status(state.db(), session_id).await? == "cancelled" {
+        let idx = persist_assistant_text(state.db(), session_id, "Stopped by user.").await?;
+        return Ok(Turn::Message { text: "Stopped by user.".into(), turn_index: idx });
+    }
+
     for item in &results {
         let fn_name = item.tool.clone().unwrap_or_default();
         let (content, image, mime) = if let Some(err) = &item.error {
@@ -187,6 +194,22 @@ pub async fn handle_tool_result(
     advance(state, session_id).await
 }
 
+/// Stop a running session. Marks it `cancelled` so the extension's resume
+/// logic leaves it alone. A later user message revives it (`handle_message`
+/// marks `active`), but stray `tool_result` posts after cancel get a terminal
+/// message instead of advancing the loop — that covers the race where the
+/// popup hits Stop while a `tool_result` request is still in flight: the
+/// in-flight request finishes and re-marks `active`, then the client's
+/// follow-up cancel lands last and wins.
+pub async fn cancel(state: &AppState, session_id: &str) -> AppResult<()> {
+    session_must_exist(state.db(), session_id).await?;
+    mark_status(state.db(), session_id, "cancelled").await?;
+    tracing::info!(
+        target: "scrape_backend::session",
+        %session_id, "session cancelled by user"
+    );
+    Ok(())
+}
 /// Deprecated. The old clarify protocol is gone; keep the endpoint returning a
 /// clear 410 rather than a 404 for old extension builds.
 pub async fn handle_clarify_answer(
@@ -266,6 +289,12 @@ async fn advance(state: &AppState, session_id: &str) -> AppResult<Turn> {
     let max_turns = state.config().llm.max_turns;
 
     loop {
+        // A cancel landing mid-run (e.g. during a server-side tool burst)
+        // stops the loop instead of burning more LLM steps.
+        if session_status(db, session_id).await? == "cancelled" {
+            let idx = persist_assistant_text(db, session_id, "Stopped by user.").await?;
+            return Ok(Turn::Message { text: "Stopped by user.".into(), turn_index: idx });
+        }
         // Hard cap on the number of LLM steps in one session.
         let steps = count_assistant_turns(db, session_id).await?;
         if steps >= max_turns {
@@ -506,6 +535,14 @@ async fn session_host_route(db: &SqlitePool, session_id: &str) -> AppResult<(Str
 
 async fn session_host(db: &SqlitePool, session_id: &str) -> AppResult<String> {
     let row: Option<(String,)> = sqlx::query_as("SELECT host FROM sessions WHERE id = ?1")
+        .bind(session_id)
+        .fetch_optional(db)
+        .await?;
+    row.map(|r| r.0).ok_or(AppError::SessionNotFound)
+}
+
+async fn session_status(db: &SqlitePool, session_id: &str) -> AppResult<String> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT status FROM sessions WHERE id = ?1")
         .bind(session_id)
         .fetch_optional(db)
         .await?;

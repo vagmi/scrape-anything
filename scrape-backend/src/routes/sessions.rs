@@ -17,6 +17,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/sessions/{id}", get(fetch))
         .route("/api/sessions/{id}/message", post(message))
         .route("/api/sessions/{id}/tool_result", post(tool_result))
+        .route("/api/sessions/{id}/cancel", post(cancel))
         .route("/api/sessions/{id}/clarify", post(clarify_answer))
         .route("/api/sessions/{id}/result", post(result))
 }
@@ -68,9 +69,13 @@ async fn tool_result(
     Ok(Json(TurnResp { turn }))
 }
 
+async fn cancel(State(s): State<AppState>, Path(id): Path<String>) -> AppResult<Json<Value>> {
+    session::cancel(&s, &id).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 #[derive(Deserialize)]
 pub struct ClarifyReq { pub answer: String }
-
 async fn clarify_answer(
     State(s): State<AppState>,
     Path(id): Path<String>,
