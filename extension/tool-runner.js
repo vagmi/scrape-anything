@@ -1,6 +1,6 @@
 // Runs the extension-side tools the agent asks for: `execute_script` (JS in the
 // live tab, via chrome.userScripts), `navigate` (move the tab and wait for the
-// load), and `screenshot` (captureVisibleTab). The server-side tools
+// load), and `screenshot` (captureVisibleTab of the session tab). The server-side tools
 // (list/read/write/edit over the per-origin file store) never reach here — the
 // backend resolves those itself.
 //
@@ -14,7 +14,7 @@
 /// Run one tool call. Always resolves; failures come back as { error } so the
 /// agent can see and react to them. `onProgress` receives human-readable
 /// status updates for long waits (navigate / tab settle / LLM round-trip).
-/// A 60s overall cap guarantees we never hang the popup transcript forever.
+/// A 60s overall cap guarantees we never hang the panel transcript forever.
 export async function runTool(tabId, call, onProgress) {
   const { call_id, tool, args } = call;
   const progress = (m) => { try { onProgress?.(m); } catch {} };
@@ -34,7 +34,7 @@ export async function runTool(tabId, call, onProgress) {
     } else if (tool === "navigate") {
       result = await capped(navigate(tabId, args?.url, args?.wait_ms, progress), tool);
     } else if (tool === "screenshot") {
-      result = await capped(withPageReady(tabId, () => screenshot(), progress), tool);
+      result = await capped(withPageReady(tabId, () => screenshot(tabId, progress), progress), tool);
     } else if (tool === "page_to_markdown") {
       result = await capped(withPageReady(tabId, () => pageHtml(tabId), progress), tool);
     } else {
@@ -347,10 +347,20 @@ async function pageHtml(tabId) {
   return { html: out.html, url: out.url };
 }
 
-/// Capture the visible tab as a PNG and return it base64-encoded for the agent
-/// to view. Works with the extension's activeTab + host permissions.
-async function screenshot() {
-  const dataUrl = await chrome.tabs.captureVisibleTab({ format: "png" });
+/// Capture the session's tab as a PNG and return it base64-encoded for the
+/// agent to view. `captureVisibleTab` only sees whichever tab is in front of its
+/// window, and the side panel lets the user switch tabs mid-run — so bring the
+/// session's tab forward first rather than handing the agent a picture of some
+/// other page.
+async function screenshot(tabId, onProgress) {
+  let tab = await chrome.tabs.get(tabId);
+  if (!tab.active) {
+    try { onProgress?.("Switching to the session's tab to capture it…"); } catch {}
+    await chrome.tabs.update(tabId, { active: true });
+    await sleep(300); // let the compositor paint the newly shown tab
+    tab = await chrome.tabs.get(tabId);
+  }
+  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
   if (!dataUrl) throw new Error("captureVisibleTab returned nothing");
   const comma = dataUrl.indexOf(",");
   const image_base64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;

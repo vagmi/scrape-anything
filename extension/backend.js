@@ -1,5 +1,5 @@
-// Tiny HTTP client for the scrape-backend. Lives in the popup; no MV3
-// service-worker dance needed because we only call localhost from a popup
+// Tiny HTTP client for the scrape-backend. Lives in the side panel; no MV3
+// service-worker dance needed because we only call localhost from an extension page
 // (extension origin → http://localhost works without host_permissions in MV3).
 
 const DEFAULT_BASE = "http://localhost:4546";
@@ -22,7 +22,7 @@ async function postJson(path, body, { timeoutMs = 90000 } = {}) {
     return parseResponse(res);
   } catch (e) {
     if (e?.name === "AbortError") {
-      throw new Error(`backend timed out after ${Math.round(timeoutMs / 1000)}s — it may still be thinking; reopen the popup to resume`);
+      throw new Error(`backend timed out after ${Math.round(timeoutMs / 1000)}s — it may still be thinking; reopen the panel to resume`);
     }
     throw e;
   } finally {

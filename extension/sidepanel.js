@@ -52,16 +52,25 @@ function setActiveMode() {
 
 // ──────────────────────────── storage ───────────────────────────────────────
 
-async function saveActiveSession(id) {
+// The session is stored together with the tab it drives. The panel spans the
+// whole window, so the user can wander off to other tabs mid-run; the tools
+// must keep acting on the session's tab, not whichever one is in front.
+async function saveActiveSession(id, tabId) {
   state.sessionId = id;
-  await chrome.storage.local.set({ [STORAGE_KEY]: id });
+  state.tabId = tabId;
+  await chrome.storage.local.set({ [STORAGE_KEY]: { sessionId: id, tabId } });
 }
 async function loadActiveSession() {
   const obj = await chrome.storage.local.get(STORAGE_KEY);
-  return obj[STORAGE_KEY] || null;
+  const v = obj[STORAGE_KEY];
+  if (!v) return null;
+  // Pre-side-panel builds stored the bare session id.
+  if (typeof v === "string") return { sessionId: v, tabId: null };
+  return v;
 }
 async function clearActiveSession() {
   state.sessionId = null;
+  state.tabId = null;
   await chrome.storage.local.remove(STORAGE_KEY);
 }
 
@@ -70,6 +79,91 @@ async function clearActiveSession() {
 async function getActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab;
+}
+
+async function getTab(tabId) {
+  if (!tabId) return null;
+  try { return await chrome.tabs.get(tabId); } catch { return null; }
+}
+
+/// The tab this session's tools run against. Keeps the stored binding while
+/// that tab exists; if it was closed (or never recorded), adopts the tab the
+/// user is looking at now, as long as it's a web page. Returns null otherwise.
+async function resolveSessionTab() {
+  let tab = await getTab(state.tabId);
+  if (!tab) {
+    const active = await getActiveTab().catch(() => null);
+    if (!active?.url || !/^https?:\/\//.test(active.url)) return null;
+    tab = active;
+    if (state.sessionId) await saveActiveSession(state.sessionId, tab.id);
+  }
+  state.tabId = tab.id;
+  return tab;
+}
+
+// ───────────────────────────── header ───────────────────────────────────────
+
+/// Keep the header in step with the tabs: which page the session is on, and a
+/// warning when the user is looking at a different tab. Called from tab events,
+/// so it must be cheap and never throw.
+async function renderHeader() {
+  try {
+    const active = await getActiveTab().catch(() => null);
+    if (!state.sessionId) {
+      $("page-kind").textContent = active?.url ? `Ready on ${shortUrl(active.url)}` : "(no active tab)";
+      hide("tab-warning");
+      return;
+    }
+    const bound = await getTab(state.tabId);
+    $("page-kind").textContent = bound
+      ? `Session on ${shortUrl(bound.url)}`
+      : "Session tab was closed — sending will continue on this tab.";
+    if (bound && active && bound.id !== active.id) show("tab-warning");
+    else hide("tab-warning");
+  } catch {}
+}
+
+async function showSessionTab() {
+  const tab = await getTab(state.tabId);
+  if (!tab) return;
+  await chrome.tabs.update(tab.id, { active: true });
+  await chrome.windows.update(tab.windowId, { focused: true });
+}
+
+// ───────────────────────────── driving ──────────────────────────────────────
+
+/// Run `fn` as the one driver of this session's agent loop. Two windows can
+/// each have the panel open on the same stored session; a Web Lock (shared by
+/// all extension pages) makes sure only one of them runs tools and posts
+/// results. The lock drops automatically when the panel closes. Handles the
+/// Send/Stop button state around the run.
+async function drive(fn) {
+  $("send").disabled = true;
+  state.running = true;
+  state.stopRequested = false;
+  $("stop").disabled = false;
+  show("stop");
+  try {
+    const run = async () => {
+      try {
+        await fn();
+      } catch (e) {
+        if (!state.stopRequested) setStatus(e.message || String(e), "error");
+      }
+    };
+    if (!state.sessionId) return await run(); // brand-new session: nothing to contend with
+    await navigator.locks.request(`scrape-session:${state.sessionId}`, { ifAvailable: true }, async (lock) => {
+      if (!lock) {
+        setStatus("This session is being run from another window's panel.", "error");
+        return;
+      }
+      await run();
+    });
+  } finally {
+    state.running = false;
+    hide("stop");
+    $("send").disabled = false;
+  }
 }
 
 // Injected fresh every time: a navigation wipes the content script out of the
@@ -202,13 +296,10 @@ async function runToolLoop(turn) {
 /// backend's next turn. Tools can navigate the tab; `state.tabId` stays fixed
 /// and the session on the backend carries straight on into the new page.
 async function runCallsAndContinue(calls) {
-  // If the popup was restored without a tab (e.g. after a restart), follow the
-  // user's current tab rather than failing on a stale/null id.
-  if (!state.tabId) {
-    const tab = await getActiveTab().catch(() => null);
-    if (tab?.id) state.tabId = tab.id;
-  }
-  if (!state.tabId) throw new Error("No active tab — open a web page first.");
+  // The session's tab may have been closed mid-run; carry on in the user's
+  // current tab rather than failing on a dead id.
+  const tab = await resolveSessionTab();
+  if (!tab) throw new Error("The session's tab is gone — open a web page and hit Send to continue.");
   const results = [];
   for (const call of calls) {
     if (state.stopRequested) break;
@@ -285,28 +376,26 @@ async function onSend() {
   if (state.running) return;
   const text = $("message").value.trim();
   if (!text) { setStatus("Type something first.", "error"); return; }
-  const tab = await getActiveTab();
+
+  // A new session starts on the tab in front of the user; a follow-up keeps
+  // going on the session's own tab, wherever the user happens to be looking.
+  const tab = state.sessionId ? await resolveSessionTab() : await getActiveTab();
   if (!tab?.url || !/^https?:\/\//.test(tab.url)) {
     setStatus("Open a web page first.", "error"); return;
   }
   state.tabId = tab.id;
-
-  $("send").disabled = true;
-  state.running = true;
-  state.stopRequested = false;
-  $("stop").disabled = false;
-  show("stop");
   $("message").value = "";
 
-  try {
+  await drive(async () => {
     let turn;
     if (!state.sessionId) {
       setStatus("Collecting page signals…");
       const signals = await collectSignals(state.tabId);
       setStatus("Starting the agent…");
       const res = await backend.createSession({ url: tab.url, intention: text, signals });
-      await saveActiveSession(res.session_id);
+      await saveActiveSession(res.session_id, tab.id);
       setActiveMode();
+      renderHeader();
       appendUserTurn(text);
       turn = res.turn;
     } else {
@@ -316,20 +405,11 @@ async function onSend() {
       turn = res.turn;
     }
     await runToolLoop(turn);
-    if (!state.stopRequested && state.sessionId) {
-      // runToolLoop reports Done itself; nothing to do here.
-    }
-  } catch (e) {
-    if (!state.stopRequested) setStatus(e.message || String(e), "error");
-  } finally {
-    state.running = false;
-    hide("stop");
-    $("send").disabled = false;
-  }
+  });
 }
 
 /// Stop button: signal the loop to stand down between steps and mark the
-/// backend session cancelled so reopening the popup doesn't auto-resume it.
+/// backend session cancelled so reopening the panel doesn't auto-resume it.
 /// Sending another message afterwards revives the session.
 async function onStop() {
   if (!state.sessionId) return;
@@ -337,7 +417,7 @@ async function onStop() {
   $("stop").disabled = true;
   setStatus("Stopping…");
   try { await backend.cancelSession(state.sessionId); } catch (e) {
-    setStatus(`Stop failed (${e.message || e}) — closing the popup also halts the run.`, "error");
+    setStatus(`Stop failed (${e.message || e}) — closing the panel also halts the run.`, "error");
   }
 }
 
@@ -350,13 +430,13 @@ async function onNewSession() {
   state.running = false;
   await clearActiveSession();
   resetUiForNew();
-  await detectPage();
+  await renderHeader();
   setStatus("Started a new session.", "ok");
 }
 
 // ───────────────────────── restore on open ──────────────────────────────────
 
-async function restoreSession(sessionId) {
+async function restoreSession({ sessionId, tabId }) {
   let info;
   try {
     info = await backend.fetchSession(sessionId);
@@ -366,14 +446,15 @@ async function restoreSession(sessionId) {
     return;
   }
   state.sessionId = sessionId;
+  state.tabId = tabId;
   setActiveMode();
-  $("page-kind").textContent = `Session on ${shortUrl(info.url)}`;
+  await renderHeader();
 
   // The opening intention lives on sessions.intention, not as a turn.
   if (info.intention) appendUserTurn(info.intention);
 
-  // Tool calls the backend handed out but never got an answer for. The popup
-  // closes whenever it loses focus, which can happen mid-step; without this the
+  // Tool calls the backend handed out but never got an answer for. Closing the
+  // panel (or the browser) mid-step leaves these behind; without this the
   // session would sit waiting forever on a call nobody is going to run.
   const unanswered = new Map();
 
@@ -409,7 +490,7 @@ async function restoreSession(sessionId) {
   } else if (info.status === "active" && pending.length) {
     await resumePendingCalls(pending);
   } else if (info.status === "active" && !pending.length) {
-    // Stuck case: the popup died during POST /tool_result. The backend already
+    // Stuck case: the panel died during POST /tool_result. The backend already
     // stored our tool_response and advanced (or was cancelled mid-LLM), so
     // there is no unanswered ToolCall to re-run — but the session is still
     // active with no driver. Kicking with an empty result re-runs advance()
@@ -421,60 +502,38 @@ async function restoreSession(sessionId) {
 }
 
 /// Finish a step that was interrupted: re-run the tools the backend is still
-/// waiting on against the tab as it is now, then carry the loop on. The page may
-/// well have moved since — that's fine, the tools report where they landed and
-/// the agent re-orients from there.
+/// waiting on against the session's tab as it is now, then carry the loop on.
+/// The page may well have moved since — that's fine, the tools report where
+/// they landed and the agent re-orients from there.
 async function resumePendingCalls(calls) {
-  const tab = await getActiveTab();
-  if (!tab?.url || !/^https?:\/\//.test(tab.url)) {
+  if (!(await resolveSessionTab())) {
     setStatus("Session paused mid-step — open a web page to resume it.", "error");
     return;
   }
-  state.tabId = tab.id;
-  $("send").disabled = true;
-  state.running = true;
-  state.stopRequested = false;
-  $("stop").disabled = false;
-  show("stop");
-  try {
+  await drive(async () => {
     setStatus("Resuming the interrupted step…");
     await runToolLoop(await runCallsAndContinue(calls));
-  } catch (e) {
-    if (!state.stopRequested) setStatus(e.message || String(e), "error");
-  } finally {
-    state.running = false;
-    hide("stop");
-    $("send").disabled = false;
-  }
+  });
 }
 
-/// Recover an `active` session with no unanswered calls (popup died during the
+/// Recover an `active` session with no unanswered calls (panel died during the
 /// POST, so the backend consumed our results but we never got the next turn).
 /// An empty `results: []` just re-runs `advance()` server-side — no duplicate
 /// tool execution — and returns whatever the agent wants next.
 async function resumeStuckSession() {
-  const tab = await getActiveTab().catch(() => null);
-  if (tab?.id) state.tabId = tab.id;
-  if (!tab?.url || !/^https?:\/\//.test(tab.url)) {
+  if (!(await resolveSessionTab())) {
     setStatus("Session is active but paused — open a web page and hit Send to resume.", "error");
     return;
   }
-  $("send").disabled = true;
-  state.running = true;
-  state.stopRequested = false;
-  $("stop").disabled = false;
-  show("stop");
-  try {
+  await drive(async () => {
     setStatus("Resuming interrupted session…");
-    const { turn } = await backend.sendToolResult(state.sessionId, []);
-    await runToolLoop(turn);
-  } catch (e) {
-    if (!state.stopRequested) setStatus(`Resume failed (${e.message || e}) — hit Send to retry.`, "error");
-  } finally {
-    state.running = false;
-    hide("stop");
-    $("send").disabled = false;
-  }
+    try {
+      const { turn } = await backend.sendToolResult(state.sessionId, []);
+      await runToolLoop(turn);
+    } catch (e) {
+      throw new Error(`Resume failed (${e.message || e}) — hit Send to retry.`);
+    }
+  });
 }
 
 function restoreToolSummary(p) {
@@ -494,23 +553,27 @@ function shortUrl(url) {
   try { const u = new URL(url); return u.host + u.pathname; } catch { return url; }
 }
 
-async function detectPage() {
-  const tab = await getActiveTab();
-  if (!tab?.url) { $("page-kind").textContent = "(no active tab)"; return; }
-  $("page-kind").textContent = `Ready on ${shortUrl(tab.url)}`;
-}
-
 document.addEventListener("DOMContentLoaded", async () => {
   $("send").addEventListener("click", onSend);
   $("stop").addEventListener("click", onStop);
   $("new-session").addEventListener("click", onNewSession);
+  $("show-session-tab").addEventListener("click", showSessionTab);
   $("dl-json").addEventListener("click", () => downloadArtifact("json"));
   $("dl-csv").addEventListener("click", () => downloadArtifact("csv"));
   $("message").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); onSend(); }
   });
 
-  await detectPage();
+  // The panel outlives tab switches and navigations, so keep the header live.
+  // onActivated fires for every window; renderHeader re-reads this window's
+  // active tab, so events from other windows are harmless.
+  chrome.tabs.onActivated.addListener(() => renderHeader());
+  chrome.tabs.onUpdated.addListener((_id, info) => {
+    if (info.url || info.status === "complete") renderHeader();
+  });
+  chrome.tabs.onRemoved.addListener(() => renderHeader());
+
+  await renderHeader();
   const existing = await loadActiveSession();
   if (existing) await restoreSession(existing);
 });

@@ -7,11 +7,16 @@ path = "./scrape.db"
 
 [llm]
 provider = "gemini"
-model = "gemini-3.6-flash"
+model = "gemini-3.8-flash"
 # GEMINI_API_KEY is read from the environment, not this file.
 max_turns = 50
 max_refinements = 3
 request_timeout_secs = 60
+# Retry transient model failures (502/503/504/500/429, dropped connections)
+# with exponential backoff: 1s, 2s, 4s… capped at retry_max_delay_ms.
+max_retries = 3
+retry_base_delay_ms = 1000
+retry_max_delay_ms = 8000
 
 [cors]
 allowed_origins = ["chrome-extension://*"]

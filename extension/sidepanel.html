@@ -3,13 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <title>Scrape Anything</title>
-    <link rel="stylesheet" href="./popup.css" />
+    <link rel="stylesheet" href="./sidepanel.css" />
   </head>
   <body
-    class="w-[440px] m-0 p-4 bg-white text-gray-900 text-lg font-sans"
+    class="h-screen m-0 p-4 box-border flex flex-col bg-white text-gray-900 text-lg font-sans"
     style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;"
   >
-    <header>
+    <header class="shrink-0">
       <div class="flex justify-between items-baseline gap-2">
         <h1 class="m-0 text-xl font-semibold">Scrape Anything</h1>
         <button
@@ -20,16 +20,23 @@
         </button>
       </div>
       <p id="page-kind" class="m-0 mt-1 text-sm text-gray-500">Detecting page…</p>
+      <p id="tab-warning" class="hidden m-0 mt-1 text-sm text-amber-700">
+        You're viewing a different tab from the session's.
+        <button
+          id="show-session-tab"
+          class="bg-transparent border-0 p-0 text-sm text-[var(--color-accent)] cursor-pointer hover:underline"
+        >Show it</button>
+      </p>
     </header>
 
     <section
       id="transcript"
-      class="hidden mt-3 flex flex-col gap-3 max-h-[420px] overflow-y-auto pr-1"
+      class="hidden mt-3 flex-1 min-h-0 flex flex-col gap-3 overflow-y-auto pr-1"
     ></section>
 
     <section
       id="results"
-      class="hidden mt-3 flex items-center justify-between gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2"
+      class="hidden shrink-0 mt-3 flex items-center justify-between gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2"
     >
       <span id="results-count" class="text-base text-gray-700">—</span>
       <span class="flex gap-2">
@@ -46,7 +53,7 @@
       </span>
     </section>
 
-    <section id="composer" class="mt-4 flex flex-col gap-2">
+    <section id="composer" class="shrink-0 mt-auto pt-4 flex flex-col gap-2">
       <label id="composer-label" for="message" class="text-base text-gray-600">
         What do you want extracted?
       </label>
@@ -78,8 +85,8 @@
       </div>
     </section>
 
-    <p id="status" class="m-0 mt-3 min-h-[20px] text-sm text-gray-500"></p>
+    <p id="status" class="shrink-0 m-0 mt-3 min-h-[20px] text-sm text-gray-500"></p>
 
-    <script type="module" src="./popup.js"></script>
+    <script type="module" src="./sidepanel.js"></script>
   </body>
 </html>

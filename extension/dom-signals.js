@@ -1,6 +1,6 @@
 // Builds the structural fingerprint the backend planner consumes.
 // SPEC §4. Pure-function side effect free except for reading the DOM.
-// Installs window.__scrape.signals() so the popup can re-collect cheaply.
+// Installs window.__scrape.signals() so the panel can re-collect cheaply.
 
 (function () {
   const VERSION = "0.2.0";

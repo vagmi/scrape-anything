@@ -46,10 +46,12 @@ pub async fn step(state: &AppState, session_id: &str) -> AppResult<Step> {
         "calling gemini (function-calling)"
     );
 
-    let llm = &state.inner.llm;
-    let resp = llm
-        .client
-        .exec_chat(llm.model.as_str(), req, Some(&opts))
+    // Retries transient failures (502/503/429…) itself; an error here means
+    // the model stayed down through every retry, or the request was rejected.
+    let resp = state
+        .inner
+        .llm
+        .exec_chat(req, Some(&opts))
         .await
         .map_err(|e| AppError::LlmUnavailable(e.to_string()))?;
 

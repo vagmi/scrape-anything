@@ -69,7 +69,7 @@ npm run build      # produces extension/dist/
 ```
 
 For iterative development, `npm run dev` keeps Vite watching: edits to
-`popup.html`, `popup.css`, `popup.js`, etc. trigger an automatic rebuild and
+`sidepanel.html`, `sidepanel.css`, `sidepanel.js`, etc. trigger an automatic rebuild and
 the extension hot-reloads in Chrome.
 
 Then:
@@ -150,11 +150,13 @@ return { kind: "listing", items };
 - `package.json` / `vite.config.js` — build pipeline (Vite +
   `@crxjs/vite-plugin` + Tailwind v4).
 - `manifest.json` — MV3, requests `activeTab`, `scripting`, `downloads`,
-  `storage`, `userScripts`, broad host access; declares `dom-signals.js`
+  `storage`, `userScripts`, `sidePanel`, `<all_urls>` host access; declares `dom-signals.js`
   as a `web_accessible_resource` so it ends up in the bundle.
-- `popup.html` / `popup.css` / `popup.js` — the popup UI; drives the
-  collect-signals → tool-loop → download cycle. Tailwind classes on the static
-  markup; `popup.css` defines component classes (`.turn`, `.turn.tool`) via
+- `sidepanel.html` / `sidepanel.css` / `sidepanel.js` — the window-wide side
+  panel UI (opened from the toolbar icon); drives the collect-signals →
+  tool-loop → download cycle. The panel stays open across navigations and tab
+  switches; each session is bound to the tab it started on. Tailwind classes on
+  the static markup; `sidepanel.css` defines component classes (`.turn`, `.turn.tool`) via
   `@apply` for the JS-built transcript.
 - `tool-runner.js` — runs the extension-side tools: `execute_script` (via
   `chrome.userScripts`) and `screenshot` (via `chrome.tabs.captureVisibleTab`).
@@ -162,7 +164,7 @@ return { kind: "listing", items };
   (`__NEXT_DATA__`, JSON-LD, meta, candidate selectors, samples, DOM
   skeleton) under a 240 KB budget.
 - `backend.js` — `fetch` wrapper around `http://localhost:4546`.
-- `background.js` — empty MV3 service worker.
+- `background.js` — MV3 service worker; makes the toolbar icon open the side panel.
 - `dist/` — Vite build output. **This is what you load in Chrome.**
 
 ### `dashboard/`

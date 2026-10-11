@@ -48,7 +48,19 @@ pub struct Llm {
     pub max_turns: u32,
     pub max_refinements: u32,
     pub request_timeout_secs: u64,
+    /// Extra attempts after a transient LLM failure (5xx, 429, network blip).
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    /// First backoff delay; doubles each retry, capped at `retry_max_delay_ms`.
+    #[serde(default = "default_retry_base_delay_ms")]
+    pub retry_base_delay_ms: u64,
+    #[serde(default = "default_retry_max_delay_ms")]
+    pub retry_max_delay_ms: u64,
 }
+
+fn default_max_retries() -> u32 { 3 }
+fn default_retry_base_delay_ms() -> u64 { 1000 }
+fn default_retry_max_delay_ms() -> u64 { 8000 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Cors {

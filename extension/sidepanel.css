@@ -7,7 +7,7 @@
 }
 
 @layer components {
-  /* Chat bubbles — the popup builds these from popup.js at runtime. */
+  /* Chat bubbles — the panel builds these from sidepanel.js at runtime. */
   .turn {
     @apply rounded-md px-3 py-2.5 text-lg leading-snug break-words;
   }
@@ -71,6 +71,6 @@
   }
 }
 
-/* Status colors set imperatively by popup.js via el.className = "ok" | "error". */
+/* Status colors set imperatively by sidepanel.js via el.className = "ok" | "error". */
 #status.error { color: #c0392b; }
 #status.ok    { color: #1e7f4f; }
