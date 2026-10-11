@@ -85,6 +85,10 @@ export const backend = {
   fetchArtifact(sessionId) {
     return getJson(`/api/sessions/${sessionId}/artifact`);
   },
+  // The dashboard's page for this session (the backend serves the dashboard).
+  sessionPageUrl(sessionId) {
+    return `${baseUrl()}/sessions/${encodeURIComponent(sessionId)}`;
+  },
   // Direct download URL served by the backend with a Content-Disposition header.
   artifactUrl(artifactId, format) {
     return `${baseUrl()}/api/artifacts/${artifactId}.${format}`;

@@ -32,6 +32,7 @@ function resetUiForNew() {
   state.toolEls.clear();
   $("transcript").innerHTML = "";
   hide("transcript");
+  show("empty");
   hide("results");
   hide("stop");
   $("stop").disabled = false;
@@ -45,6 +46,7 @@ function resetUiForNew() {
 }
 
 function setActiveMode() {
+  hide("empty");
   show("transcript");
   $("composer-label").textContent = "Refine, or ask for something else:";
   $("send").textContent = "Send";
@@ -110,17 +112,33 @@ async function renderHeader() {
   try {
     const active = await getActiveTab().catch(() => null);
     if (!state.sessionId) {
-      $("page-kind").textContent = active?.url ? `Ready on ${shortUrl(active.url)}` : "(no active tab)";
+      setPageContext(active, active?.url ? `Ready on ${shortUrl(active.url)}` : "No active tab");
+      hide("session-link");
       hide("tab-warning");
       return;
     }
+    $("session-link").href = backend.sessionPageUrl(state.sessionId);
+    show("session-link");
     const bound = await getTab(state.tabId);
-    $("page-kind").textContent = bound
-      ? `Session on ${shortUrl(bound.url)}`
-      : "Session tab was closed — sending will continue on this tab.";
+    setPageContext(
+      bound,
+      bound ? `Session on ${shortUrl(bound.url)}` : "Session tab was closed — sending continues on this tab",
+    );
     if (bound && active && bound.id !== active.id) show("tab-warning");
     else hide("tab-warning");
   } catch {}
+}
+
+function setPageContext(tab, text) {
+  $("page-kind").textContent = text;
+  $("page-kind").title = tab?.url || "";
+  const icon = $("page-favicon");
+  if (tab?.favIconUrl && /^https?:|^data:/.test(tab.favIconUrl)) {
+    icon.src = tab.favIconUrl;
+    show("page-favicon");
+  } else {
+    hide("page-favicon");
+  }
 }
 
 async function showSessionTab() {
@@ -141,6 +159,7 @@ async function drive(fn) {
   $("send").disabled = true;
   state.running = true;
   state.stopRequested = false;
+  document.body.dataset.running = "";
   $("stop").disabled = false;
   show("stop");
   try {
@@ -161,6 +180,7 @@ async function drive(fn) {
     });
   } finally {
     state.running = false;
+    delete document.body.dataset.running;
     hide("stop");
     $("send").disabled = false;
   }
@@ -211,12 +231,14 @@ function appendToolCallBubble(call) {
   const el = document.createElement("div");
   el.className = "turn tool";
   el.dataset.callId = call.call_id;
+  el.dataset.state = "running";
 
   const head = document.createElement("div");
   head.className = "tool-head";
   head.innerHTML =
-    `<span class="tool-name">${toolIcon(call.tool)} ${call.tool}</span>` +
-    `<span class="tool-status" data-role="status">running…</span>`;
+    `<span class="tool-name">${toolIcon(call.tool)}<span></span></span>` +
+    `<span class="tool-status" data-role="status"><span>running…</span></span>`;
+  head.querySelector(".tool-name > span").textContent = call.tool;
   el.appendChild(head);
 
   const detailText = call.tool === "execute_script"
@@ -245,22 +267,32 @@ function appendToolCallBubble(call) {
 function setToolStatus(callId, text, isError) {
   const el = state.toolEls.get(callId);
   if (!el) return;
-  const s = el.querySelector('[data-role="status"]');
+  const s = el.querySelector('[data-role="status"] > span');
   if (!s) return;
   s.textContent = text;
-  s.classList.toggle("error", !!isError);
+  s.title = text;
+  el.dataset.state = isError ? "error" : "ok";
 }
 
+// Lucide line icons, styled by `.icon` in sidepanel.css.
+const TOOL_ICONS = {
+  screenshot:
+    '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/>',
+  execute_script: '<path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/>',
+  navigate:
+    '<circle cx="12" cy="12" r="10"/><path d="m16.24 7.76-2.12 6.36-6.36 2.12 2.12-6.36 6.36-2.12z"/>',
+  page_to_markdown:
+    '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/>',
+};
+const DEFAULT_TOOL_ICON =
+  '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>';
+
 function toolIcon(tool) {
-  if (tool === "screenshot") return "📷";
-  if (tool === "execute_script") return "⚙️";
-  if (tool === "navigate") return "🧭";
-  if (tool === "page_to_markdown") return "📄";
-  return "🔧";
+  return `<svg class="icon" viewBox="0 0 24 24">${TOOL_ICONS[tool] || DEFAULT_TOOL_ICON}</svg>`;
 }
 
 function scrollTranscript() {
-  const t = $("transcript");
+  const t = $("scroll");
   t.scrollTop = t.scrollHeight;
 }
 
@@ -360,6 +392,7 @@ async function refreshArtifact() {
     $("dl-json").disabled = !a.item_count;
     $("dl-csv").disabled = !a.item_count;
     show("results");
+    scrollTranscript(); // the results bar just took height from the transcript
   } catch {
     // No artifact for this session yet — leave the results area hidden.
   }

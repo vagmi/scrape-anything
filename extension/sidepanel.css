@@ -1,76 +1,181 @@
 @import "tailwindcss";
 
-/* Theme tokens — keep the accent / muted colors callable as utilities. */
-@theme {
-  --color-accent: #6c5ce7;
-  --color-accent-fg: #ffffff;
+/* Design tokens. The side panel follows the browser's light/dark setting, so
+   every color goes through a variable and the dark block just swaps them. */
+:root {
+  color-scheme: light;
+  --bg: #ffffff;
+  --surface: #fafafa;
+  --surface-2: #f4f4f5;
+  --fg: #18181b;
+  --muted: #71717a;
+  --line: #e4e4e7;
+  --accent: #5b5bd6;
+  --accent-fg: #ffffff;
+  --accent-soft: #eef0ff;
+  --danger: #dc2626;
+  --danger-soft: #fef2f2;
+  --ok: #16a34a;
+  --warn: #b45309;
+  --warn-soft: #fffbeb;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #18181b;
+    --surface: #1f1f23;
+    --surface-2: #27272a;
+    --fg: #f4f4f5;
+    --muted: #a1a1aa;
+    --line: #2e2e33;
+    --accent: #8b8cf8;
+    --accent-fg: #111118;
+    --accent-soft: #25254a;
+    --danger: #f87171;
+    --danger-soft: #3a1d1d;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --warn-soft: #2b2410;
+  }
+}
+
+@theme inline {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
 }
 
 @layer components {
-  /* Chat bubbles — the panel builds these from sidepanel.js at runtime. */
+  /* Line icons (lucide paths), sized and stroked by the surrounding text. */
+  .icon {
+    @apply size-3.5 shrink-0 fill-none stroke-current;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .btn {
+    @apply inline-flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border
+           px-2.5 text-xs font-medium no-underline transition-colors
+           disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-ghost {
+    @apply border-transparent bg-transparent text-muted hover:bg-surface-2 hover:text-fg;
+  }
+  .btn-outline {
+    @apply border-line bg-bg text-fg enabled:hover:bg-surface-2;
+  }
+  .btn-primary {
+    @apply border-accent bg-accent px-3.5 text-accent-fg enabled:hover:brightness-110;
+  }
+  .btn-danger {
+    @apply border-line bg-bg text-danger hover:bg-danger-soft;
+  }
+
+  .composer {
+    @apply rounded-xl border border-line bg-bg transition-shadow
+           focus-within:border-accent focus-within:ring-3 focus-within:ring-accent/15;
+  }
+  .composer textarea {
+    @apply block w-full resize-none border-0 bg-transparent px-3 pt-2.5 pb-1 font-sans
+           text-[13px] leading-relaxed text-fg outline-none placeholder:text-muted/70;
+  }
+
+  /* ── Transcript (built by sidepanel.js) ───────────────────────────────── */
+
   .turn {
-    @apply rounded-md px-3 py-2.5 text-lg leading-snug break-words;
+    @apply text-[13px] leading-relaxed break-words;
   }
   .turn.user {
-    @apply self-end max-w-[92%] bg-indigo-50 border border-indigo-200;
-  }
-  .turn.user::before {
-    content: "you";
-    @apply block text-xs text-gray-500 mb-1;
+    @apply max-w-[85%] self-end whitespace-pre-wrap rounded-xl rounded-br-sm bg-accent-soft px-3 py-2;
   }
   .turn.assistant {
-    @apply bg-gray-50 border border-gray-200;
+    @apply self-stretch whitespace-pre-wrap;
   }
   .turn.assistant::before {
-    content: "assistant";
-    @apply block text-xs text-gray-500 mb-1.5;
-  }
-  .turn .rationale {
-    @apply text-lg text-gray-700 m-0 mb-2;
-  }
-  .turn details {
-    @apply mt-1.5 bg-white border border-gray-200 rounded;
-  }
-  .turn details > summary {
-    @apply px-2.5 py-1.5 cursor-pointer select-none text-sm text-gray-500;
-  }
-  .turn details > pre {
-    @apply m-0 p-2.5 border-t border-gray-200 text-sm font-mono
-           whitespace-pre-wrap break-words max-h-[220px] overflow-auto;
+    content: "Agent";
+    @apply mb-1 block text-[11px] font-medium tracking-wide text-muted uppercase;
   }
 
-  /* Tool-call bubble (execute_script / screenshot steps). */
   .turn.tool {
-    @apply bg-white border border-gray-200 text-base;
-  }
-  .turn.tool::before {
-    content: "tool";
-    @apply block text-xs text-gray-400 mb-1;
+    @apply self-stretch overflow-hidden rounded-lg border border-line bg-surface text-xs;
   }
   .turn.tool .tool-head {
-    @apply flex justify-between items-center gap-2;
+    @apply flex flex-wrap items-center gap-2 px-2.5 py-1.5;
   }
   .turn.tool .tool-name {
-    @apply font-mono text-sm text-gray-700;
+    @apply flex shrink-0 items-center gap-1.5 font-mono text-[11.5px] text-fg;
+  }
+  .turn.tool .tool-name .icon {
+    @apply text-muted;
   }
   .turn.tool .tool-status {
-    @apply text-sm text-gray-500;
+    @apply ml-auto flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted;
   }
-  .turn.tool .tool-status.error {
-    @apply text-red-600;
+  .turn.tool .tool-status > span {
+    @apply truncate;
   }
-
-  .result-line {
-    @apply flex justify-between items-center gap-2 mt-2;
+  .turn.tool .tool-status::before {
+    content: "";
+    @apply size-1.5 shrink-0 rounded-full bg-accent;
   }
-  .result-line strong { @apply text-lg; }
-  .result-line .actions { @apply flex gap-1.5; }
-  .result-line button {
-    @apply px-2 py-1 text-sm border border-gray-200 rounded
-           bg-gray-50 hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed;
+  .turn.tool[data-state="running"] .tool-status::before {
+    @apply animate-pulse;
+  }
+  .turn.tool[data-state="ok"] .tool-status::before {
+    @apply bg-ok;
+  }
+  /* Errors are worth reading in full: give them their own wrapped line. */
+  .turn.tool[data-state="error"] .tool-status {
+    @apply ml-0 basis-full items-start text-danger;
+  }
+  .turn.tool[data-state="error"] .tool-status > span {
+    @apply whitespace-normal;
+  }
+  .turn.tool[data-state="error"] .tool-status::before {
+    @apply mt-1.5;
+  }
+  .turn.tool[data-state="error"] .tool-status::before {
+    @apply bg-danger;
+  }
+  .turn.tool details {
+    @apply border-t border-line;
+  }
+  .turn.tool details > summary {
+    @apply cursor-pointer px-2.5 py-1 text-[11px] text-muted select-none hover:text-fg;
+  }
+  .turn.tool details > pre {
+    @apply m-0 max-h-[200px] overflow-auto border-t border-line bg-bg px-2.5 py-2 font-mono
+           text-[11px] leading-snug whitespace-pre-wrap break-words;
   }
 }
 
-/* Status colors set imperatively by sidepanel.js via el.className = "ok" | "error". */
-#status.error { color: #c0392b; }
-#status.ok    { color: #1e7f4f; }
+/* Status line under the composer. sidepanel.js sets its className to
+   "" | "ok" | "error", so it's styled here rather than with utilities. */
+#status {
+  @apply m-0 mt-2 min-h-4 truncate text-[11.5px] text-muted;
+}
+#status.error { @apply text-danger; }
+#status.ok    { @apply text-ok; }
+/* Spinner while an agent loop is running (body[data-running] set by drive()). */
+body[data-running] #status:not(.error)::before {
+  content: "";
+  @apply mr-1.5 inline-block size-2.5 animate-spin rounded-full border-[1.5px] border-line
+         border-t-accent align-[-1px];
+}
+
+/* `hidden` must beat the flex/grid utilities these elements also carry. */
+.hidden { display: none !important; }

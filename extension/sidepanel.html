@@ -5,87 +5,77 @@
     <title>Scrape Anything</title>
     <link rel="stylesheet" href="./sidepanel.css" />
   </head>
-  <body
-    class="h-screen m-0 p-4 box-border flex flex-col bg-white text-gray-900 text-lg font-sans"
-    style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;"
-  >
-    <header class="shrink-0">
-      <div class="flex justify-between items-baseline gap-2">
-        <h1 class="m-0 text-xl font-semibold">Scrape Anything</h1>
-        <button
-          id="new-session"
-          class="bg-transparent border-0 p-0 text-base text-[var(--color-accent)] cursor-pointer hover:underline"
-        >
-          New session
+  <body class="h-screen m-0 flex flex-col bg-bg text-fg font-sans antialiased">
+    <header class="shrink-0 border-b border-line px-3 py-2">
+      <div class="flex items-center gap-2">
+        <div class="flex min-w-0 flex-1 items-center gap-2">
+          <img id="page-favicon" class="hidden size-4 shrink-0 rounded-sm" alt="" />
+          <p id="page-kind" class="m-0 truncate text-xs text-muted">Detecting page…</p>
+        </div>
+        <a id="session-link" class="btn btn-ghost hidden" target="_blank" rel="noopener" title="Open this session in the dashboard">
+          Dashboard
+          <svg class="icon" viewBox="0 0 24 24"><path d="M15 3h6v6" /><path d="M10 14 21 3" /><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3" /></svg>
+        </a>
+        <button id="new-session" class="btn btn-ghost" title="Start a new session">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M5 12h14" /><path d="M12 5v14" /></svg>
+          New
         </button>
       </div>
-      <p id="page-kind" class="m-0 mt-1 text-sm text-gray-500">Detecting page…</p>
-      <p id="tab-warning" class="hidden m-0 mt-1 text-sm text-amber-700">
-        You're viewing a different tab from the session's.
-        <button
-          id="show-session-tab"
-          class="bg-transparent border-0 p-0 text-sm text-[var(--color-accent)] cursor-pointer hover:underline"
-        >Show it</button>
+      <p id="tab-warning" class="hidden m-0 mt-2 flex items-center gap-2 rounded-md bg-warn-soft px-2.5 py-1.5 text-xs text-warn">
+        <span class="flex-1">You're viewing a different tab from the session's.</span>
+        <button id="show-session-tab" class="cursor-pointer border-0 bg-transparent p-0 text-xs font-medium text-warn underline underline-offset-2">Show it</button>
       </p>
     </header>
 
-    <section
-      id="transcript"
-      class="hidden mt-3 flex-1 min-h-0 flex flex-col gap-3 overflow-y-auto pr-1"
-    ></section>
+    <main id="scroll" class="flex-1 min-h-0 overflow-y-auto px-3 py-4">
+      <div id="empty" class="flex h-full flex-col items-center justify-center px-4 text-center">
+        <div class="mb-3 flex size-10 items-center justify-center rounded-full bg-accent-soft text-accent">
+          <svg class="icon size-5" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2" /><path d="M17 3h2a2 2 0 0 1 2 2v2" /><path d="M21 17v2a2 2 0 0 1-2 2h-2" /><path d="M7 21H5a2 2 0 0 1-2-2v-2" /><path d="M7 8h10" /><path d="M7 12h10" /><path d="M7 16h6" /></svg>
+        </div>
+        <p class="m-0 text-sm font-medium">Extract data from this page</p>
+        <p class="m-0 mt-1 max-w-[260px] text-xs leading-relaxed text-muted">
+          Describe what you want. The agent explores the page, writes an extractor,
+          and can follow pagination. Results download as JSON or CSV.
+        </p>
+      </div>
+      <section id="transcript" class="hidden flex flex-col gap-3"></section>
+    </main>
 
-    <section
-      id="results"
-      class="hidden shrink-0 mt-3 flex items-center justify-between gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2"
-    >
-      <span id="results-count" class="text-base text-gray-700">—</span>
-      <span class="flex gap-2">
-        <button
-          id="dl-json"
-          class="rounded-md border border-gray-300 bg-white px-2.5 py-1 text-sm cursor-pointer hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
-          disabled
-        >JSON</button>
-        <button
-          id="dl-csv"
-          class="rounded-md border border-gray-300 bg-white px-2.5 py-1 text-sm cursor-pointer hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
-          disabled
-        >CSV</button>
-      </span>
-    </section>
+    <footer class="shrink-0 px-3 pb-3 pt-2">
+      <section id="results" class="hidden mb-2 flex items-center gap-2 rounded-lg border border-line bg-surface px-3 py-2">
+        <svg class="icon text-ok" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></svg>
+        <span id="results-count" class="flex-1 truncate text-xs font-medium">—</span>
+        <button id="dl-json" class="btn btn-outline" disabled>
+          <svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m7 10 5 5 5-5" /><path d="M12 15V3" /></svg>
+          JSON
+        </button>
+        <button id="dl-csv" class="btn btn-outline" disabled>
+          <svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m7 10 5 5 5-5" /><path d="M12 15V3" /></svg>
+          CSV
+        </button>
+      </section>
 
-    <section id="composer" class="shrink-0 mt-auto pt-4 flex flex-col gap-2">
-      <label id="composer-label" for="message" class="text-base text-gray-600">
+      <label id="composer-label" for="message" class="mb-1.5 block text-xs font-medium text-muted">
         What do you want extracted?
       </label>
-      <textarea
-        id="message"
-        rows="3"
-        placeholder="e.g. all upcoming tech events with title, url, and start time"
-        class="w-full resize-y rounded-md border border-gray-200 p-2.5 text-base
-               focus:outline focus:outline-2 focus:outline-[var(--color-accent)] focus:-outline-offset-1"
-      ></textarea>
-      <div class="flex gap-2">
-        <button
-          id="send"
-          class="flex-1 rounded-md border border-[var(--color-accent)]
-                 bg-[var(--color-accent)] text-white px-3 py-2 text-base
-                 cursor-pointer hover:brightness-95
-                 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          Plan &amp; run
-        </button>
-        <button
-          id="stop"
-          class="hidden rounded-md border border-red-300 bg-white text-red-600
-                 px-3 py-2 text-base cursor-pointer hover:bg-red-50
-                 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          Stop
-        </button>
+      <div class="composer">
+        <textarea
+          id="message"
+          rows="3"
+          placeholder="e.g. all upcoming tech events with title, url, and start time"
+        ></textarea>
+        <div class="flex items-center gap-2 px-2 pb-2">
+          <span class="flex-1 pl-1 text-[11px] text-muted">⌘ ↵ to send</span>
+          <button id="stop" class="btn btn-danger hidden">
+            <svg class="icon" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5" /></svg>
+            Stop
+          </button>
+          <button id="send" class="btn btn-primary">Scrape</button>
+        </div>
       </div>
-    </section>
 
-    <p id="status" class="shrink-0 m-0 mt-3 min-h-[20px] text-sm text-gray-500"></p>
+      <p id="status"></p>
+    </footer>
 
     <script type="module" src="./sidepanel.js"></script>
   </body>
