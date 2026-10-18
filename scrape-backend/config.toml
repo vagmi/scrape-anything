@@ -9,7 +9,8 @@ path = "./scrape.db"
 provider = "gemini"
 model = "gemini-3.8-flash"
 # GEMINI_API_KEY is read from the environment, not this file.
-max_turns = 50
+# Max LLM steps per user request (resets on each follow-up message).
+max_turns = 100
 max_refinements = 3
 request_timeout_secs = 60
 # Retry transient model failures (502/503/504/500/429, dropped connections)

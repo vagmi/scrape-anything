@@ -3,7 +3,10 @@ import { runTool } from "./tool-runner.js";
 
 const $ = (id) => document.getElementById(id);
 const STORAGE_KEY = "scrape_anything.activeSessionId";
-const MAX_TOOL_ITERATIONS = 60; // client guard mirroring the backend max_turns
+const MAX_TOOL_ITERATIONS = 100; // client guard mirroring the backend max_turns (per request)
+// Waits before re-trying an agent step when the model is down even after the
+// backend's own quick retries (~1 min of waiting all told).
+const LLM_OUTAGE_RETRY_DELAYS_MS = [5000, 10000, 20000, 30000];
 
 const state = {
   tabId: null,
@@ -298,6 +301,43 @@ function scrollTranscript() {
 
 // ─────────────────────────── the agent tool loop ────────────────────────────
 
+/// The backend answers 502 LLM_UNAVAILABLE / 504 LLM_TIMEOUT when Gemini kept
+/// failing through its own retries (a 502/503 from Google, an empty response).
+function isLlmOutage(e) {
+  return e?.code === "LLM_UNAVAILABLE" || e?.code === "LLM_TIMEOUT" || [502, 503, 504].includes(e?.status);
+}
+
+/// Run a backend call that advances the agent (`sendMessage`/`sendToolResult`),
+/// riding out a model outage. By the time the backend reports one, our tool
+/// results / user message are already stored, so recovery is just an empty
+/// `tool_result` post: it re-runs `advance()` without re-running tools or
+/// duplicating the message. Resolves `{ turn: null }` if the user hits Stop
+/// while we wait.
+async function advanceWithRecovery(request) {
+  try {
+    return await request();
+  } catch (e) {
+    if (!isLlmOutage(e) || !state.sessionId) throw e;
+    let last = e;
+    for (let i = 0; i < LLM_OUTAGE_RETRY_DELAYS_MS.length; i++) {
+      for (let left = LLM_OUTAGE_RETRY_DELAYS_MS[i] / 1000; left > 0; left--) {
+        if (state.stopRequested) return { turn: null };
+        setStatus(`Model unavailable — retrying in ${left}s (attempt ${i + 1}/${LLM_OUTAGE_RETRY_DELAYS_MS.length})…`, "error");
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      if (state.stopRequested) return { turn: null };
+      setStatus("Thinking… (retrying agent step)");
+      try {
+        return await backend.sendToolResult(state.sessionId, []);
+      } catch (e2) {
+        if (!isLlmOutage(e2)) throw e2;
+        last = e2;
+      }
+    }
+    throw new Error(`Model still unavailable (${last.message}) — hit Send or reopen the panel to resume.`);
+  }
+}
+
 /// Given a turn from the backend, run any tools it asks for and post the
 /// results back, looping until the agent returns a terminal message.
 /// Checks `state.stopRequested` between steps so the Stop button breaks out
@@ -354,7 +394,7 @@ async function runCallsAndContinue(calls) {
     return { kind: "message", text: "Stopped.", turn_index: -1 };
   }
   setStatus("Thinking… (agent step running)");
-  const { turn: next } = await backend.sendToolResult(state.sessionId, results);
+  const { turn: next } = await advanceWithRecovery(() => backend.sendToolResult(state.sessionId, results));
   if (state.stopRequested) {
     try { await backend.cancelSession(state.sessionId); } catch {}
     await refreshArtifact();
@@ -434,7 +474,7 @@ async function onSend() {
     } else {
       appendUserTurn(text);
       setStatus("Thinking…");
-      const res = await backend.sendMessage(state.sessionId, text);
+      const res = await advanceWithRecovery(() => backend.sendMessage(state.sessionId, text));
       turn = res.turn;
     }
     await runToolLoop(turn);
@@ -561,7 +601,7 @@ async function resumeStuckSession() {
   await drive(async () => {
     setStatus("Resuming interrupted session…");
     try {
-      const { turn } = await backend.sendToolResult(state.sessionId, []);
+      const { turn } = await advanceWithRecovery(() => backend.sendToolResult(state.sessionId, []));
       await runToolLoop(turn);
     } catch (e) {
       throw new Error(`Resume failed (${e.message || e}) — hit Send to retry.`);

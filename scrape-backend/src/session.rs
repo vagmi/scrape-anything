@@ -295,18 +295,19 @@ async fn advance(state: &AppState, session_id: &str) -> AppResult<Turn> {
             let idx = persist_assistant_text(db, session_id, "Stopped by user.").await?;
             return Ok(Turn::Message { text: "Stopped by user.".into(), turn_index: idx });
         }
-        // Hard cap on the number of LLM steps in one session.
-        let steps = count_assistant_turns(db, session_id).await?;
+        // Hard cap on LLM steps per user request; each follow-up message
+        // gets a fresh budget so a long session doesn't lock up for good.
+        let steps = count_assistant_turns_since_user(db, session_id).await?;
         if steps >= max_turns {
             let idx = persist_assistant_text(
                 db,
                 session_id,
-                "Stopped: reached the maximum number of steps for this session.",
+                "Stopped: reached the step limit for this request — send a follow-up message to continue.",
             )
             .await?;
             mark_status(db, session_id, "completed").await?;
             return Ok(Turn::Message {
-                text: "Stopped: reached the maximum number of steps for this session.".into(),
+                text: "Stopped: reached the step limit for this request — send a follow-up message to continue.".into(),
                 turn_index: idx,
             });
         }
@@ -549,9 +550,11 @@ async fn session_status(db: &SqlitePool, session_id: &str) -> AppResult<String> 
     row.map(|r| r.0).ok_or(AppError::SessionNotFound)
 }
 
-async fn count_assistant_turns(db: &SqlitePool, session_id: &str) -> AppResult<u32> {
+async fn count_assistant_turns_since_user(db: &SqlitePool, session_id: &str) -> AppResult<u32> {
     let row: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM turns WHERE session_id = ?1 AND role = 'llm' AND kind = 'assistant'",
+        "SELECT COUNT(*) FROM turns WHERE session_id = ?1 AND role = 'llm' AND kind = 'assistant' \
+         AND turn_index > COALESCE( \
+           (SELECT MAX(turn_index) FROM turns WHERE session_id = ?1 AND role = 'user'), -1)",
     )
     .bind(session_id)
     .fetch_one(db)
