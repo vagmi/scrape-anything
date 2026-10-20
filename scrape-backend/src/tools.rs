@@ -138,7 +138,8 @@ pub fn catalog() -> Vec<Tool> {
         Tool::new(EXECUTE_SCRIPT)
             .with_description(
                 "Run JavaScript in the live page and get its return value back. The code is the body of an \
-                 async function with access to document/window/location. Use it to probe structure and to \
+                 async function running in the page's own JS context (as in the DevTools console), so page globals and \
+                 framework internals are visible and the page CSP does not apply. Use it to probe structure and to \
                  perform the final extraction — end with `return { kind, items }` where kind is \"listing\" or \
                  \"event\" and items is an array of plain objects. The last such result becomes the saved artifact, \
                  UNLESS you add `append: true` — then its items are merged into the rows collected so far in \

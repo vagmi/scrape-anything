@@ -1,5 +1,5 @@
 // Runs the extension-side tools the agent asks for: `execute_script` (JS in the
-// live tab, via chrome.userScripts), `navigate` (move the tab and wait for the
+// live tab's main world via chrome.debugger, falling back to chrome.userScripts), `navigate` (move the tab and wait for the
 // load), and `screenshot` (captureVisibleTab of the session tab). The server-side tools
 // (list/read/write/edit over the per-origin file store) never reach here — the
 // backend resolves those itself.
@@ -10,6 +10,8 @@
 // distinction honest — wait out navigations rather than failing on them, and
 // when one does kill a script, tell the agent exactly that instead of handing it
 // a silent `null`.
+
+import { DebuggerUnavailable, debuggerAllowed, evaluateInPage } from "./page-debugger.js";
 
 /// Run one tool call. Always resolves; failures come back as { error } so the
 /// agent can see and react to them. `onProgress` receives human-readable
@@ -50,7 +52,7 @@ export async function runTool(tabId, call, onProgress) {
 // off) can leave the tab mid-load or its frame torn down, so tool calls fire
 // against a context that no longer exists. These are the errors that means.
 const TRANSIENT_NAV_RE =
-  /frames? (was|were) removed|no frame with id|frame with id .* was removed|execution context was destroyed|the tab was (closed|discarded)|cannot access contents|no frames executed|receiving end does not exist|target closed/i;
+  /frames? (was|were) removed|no frame with id|frame with id .* was removed|execution context was destroyed|the tab was (closed|discarded)|cannot access contents|no frames executed|receiving end does not exist|target closed|inspected target navigated or closed|cannot find context with specified id/i;
 
 /// Run an extension-side tool only once the tab has finished loading. On a
 /// transient navigation error, wait for the (likely new) page to settle and
@@ -304,9 +306,26 @@ async function tabUrl(tabId) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /// Run JS in the page and return whatever it returns (probe value or the
-/// { kind, items } extraction). Uses chrome.userScripts so the code runs
-/// outside the page CSP.
+/// { kind, items } extraction). Prefers the page's main world via the debugger
+/// (sees app globals and framework internals, ignores the page CSP); falls back
+/// to the isolated-world userScripts path if the debugger can't attach.
 async function executeScript(tabId, code) {
+  if (debuggerAllowed()) {
+    try {
+      return await evaluateInPage(tabId, code);
+    } catch (e) {
+      // Only fall back when nothing ran: once attached, an error belongs to the
+      // agent's script, and re-running it elsewhere could repeat its side effects.
+      if (!(e instanceof DebuggerUnavailable)) throw e;
+      console.warn("debugger attach failed, falling back to userScripts:", e.message);
+    }
+  }
+  return await executeUserScript(tabId, code);
+}
+
+/// Isolated-world execution via chrome.userScripts — runs outside the page CSP
+/// but can't see the page's own JS objects.
+async function executeUserScript(tabId, code) {
   if (!chrome.userScripts) {
     throw new Error(
       "chrome.userScripts unavailable. Enable Developer Mode in " +

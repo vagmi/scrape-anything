@@ -1,5 +1,6 @@
 import { backend } from "./backend.js";
 import { runTool } from "./tool-runner.js";
+import { detach as detachDebugger } from "./page-debugger.js";
 
 const $ = (id) => document.getElementById(id);
 const STORAGE_KEY = "scrape_anything.activeSessionId";
@@ -388,6 +389,7 @@ async function runCallsAndContinue(calls) {
     // tell the backend to stand down (best-effort; an in-flight request may
     // re-mark the session active, so cancel lands last and wins).
     setStatus("Stopping…");
+  detachDebugger(state.tabId);
     try { await backend.cancelSession(state.sessionId); } catch {}
     await refreshArtifact();
     setStatus("Stopped.", "");
@@ -489,6 +491,7 @@ async function onStop() {
   state.stopRequested = true;
   $("stop").disabled = true;
   setStatus("Stopping…");
+  detachDebugger(state.tabId);
   try { await backend.cancelSession(state.sessionId); } catch (e) {
     setStatus(`Stop failed (${e.message || e}) — closing the panel also halts the run.`, "error");
   }
@@ -501,6 +504,7 @@ async function onNewSession() {
     try { await backend.cancelSession(state.sessionId); } catch {}
   }
   state.running = false;
+  await detachDebugger(state.tabId);
   await clearActiveSession();
   resetUiForNew();
   await renderHeader();

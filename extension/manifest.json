@@ -3,7 +3,7 @@
   "name": "Scrape Anything",
   "version": "0.6.0",
   "description": "Agentic LLM scraping for any web page. Local backend on http://localhost:4546.",
-  "permissions": ["activeTab", "tabs", "scripting", "downloads", "storage", "userScripts", "sidePanel"],
+  "permissions": ["activeTab", "tabs", "scripting", "downloads", "storage", "userScripts", "sidePanel", "debugger"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_title": "Scrape this page"

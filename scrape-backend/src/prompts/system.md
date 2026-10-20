@@ -105,9 +105,20 @@ you extract on the next call.
 
 - The runner wraps your `code` in `(async function(){ … })()`; top-level `await`
   and `return` both work. No IIFE, no imports.
-- Allowed: `document`, `window`, `location`, `URL`, `Date`, `JSON`, `setTimeout`
-  (via `new Promise`), `IntersectionObserver`, `MutationObserver`.
-- Forbidden: `chrome.*`, `eval`, `new Function`, external `fetch()`, `import()`.
+- Your code runs in the page's **own JS context** (like the DevTools console),
+  not a sandbox, and the page CSP does not apply. You can read app globals
+  (`window.__APOLLO_CLIENT__`, `window.__NEXT_DATA__`, Redux stores) and
+  framework internals on DOM nodes — e.g. React props live on the key starting
+  with `__reactProps$`, so a stubborn component's `onChange`/`onInputValueChange`
+  /`onSelect` can be called directly. The page's own `fetch` carries its cookies,
+  so same-origin GraphQL/JSON endpoints are fair game.
+- Typing into React-controlled inputs: set the value with the native setter
+  (`Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+  .call(el, v)`) then `el.dispatchEvent(new Event('input', { bubbles: true }))`.
+  If an autocomplete still doesn't react, call its React props handler instead.
+- Because you share the page's globals, don't clobber them: no top-level
+  assignments to `window.*`, don't override built-ins.
+- Forbidden: `chrome.*`, external (cross-origin) `fetch()`, `import()`.
 - Use defensive access (`?.`, `??`) — pages are messy.
 
 ### Scrolling for lazy-loaded lists
