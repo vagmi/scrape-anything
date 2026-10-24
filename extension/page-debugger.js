@@ -53,6 +53,11 @@ export async function detach(tabId) {
   try { await chrome.debugger.detach({ tabId }); } catch {}
 }
 
+/// Detach from every tab we attached to (session stopped or replaced).
+export async function detachAll() {
+  await Promise.all([...attached].map(detach));
+}
+
 /// Evaluate `code` (an async function body) in the tab's top frame, main world,
 /// and return its value. Throws with the page's own error message on an
 /// uncaught exception.

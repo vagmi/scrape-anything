@@ -1,6 +1,7 @@
 import { backend } from "./backend.js";
 import { runTool } from "./tool-runner.js";
-import { detach as detachDebugger } from "./page-debugger.js";
+import { detachAll as detachDebugger } from "./page-debugger.js";
+import { ensureGroup, sessionTabs } from "./session-tabs.js";
 
 const $ = (id) => document.getElementById(id);
 const STORAGE_KEY = "scrape_anything.activeSessionId";
@@ -10,7 +11,8 @@ const MAX_TOOL_ITERATIONS = 100; // client guard mirroring the backend max_turns
 const LLM_OUTAGE_RETRY_DELAYS_MS = [5000, 10000, 20000, 30000];
 
 const state = {
-  tabId: null,
+  tabId: null, // the session tab the tools act on right now
+  groupId: null, // tab group holding all of this session's tabs
   sessionId: null,
   artifactId: null,
   toolEls: new Map(), // call_id -> tool bubble element
@@ -58,13 +60,15 @@ function setActiveMode() {
 
 // ──────────────────────────── storage ───────────────────────────────────────
 
-// The session is stored together with the tab it drives. The panel spans the
-// whole window, so the user can wander off to other tabs mid-run; the tools
-// must keep acting on the session's tab, not whichever one is in front.
-async function saveActiveSession(id, tabId) {
+// The session is stored together with the tab it drives and the tab group its
+// tabs live in. The panel spans the whole window, so the user can wander off to
+// other tabs mid-run; the tools must keep acting on the session's tab, not
+// whichever one is in front.
+async function saveActiveSession(id, tabId, groupId = state.groupId) {
   state.sessionId = id;
   state.tabId = tabId;
-  await chrome.storage.local.set({ [STORAGE_KEY]: { sessionId: id, tabId } });
+  state.groupId = groupId;
+  await chrome.storage.local.set({ [STORAGE_KEY]: { sessionId: id, tabId, groupId } });
 }
 async function loadActiveSession() {
   const obj = await chrome.storage.local.get(STORAGE_KEY);
@@ -77,6 +81,7 @@ async function loadActiveSession() {
 async function clearActiveSession() {
   state.sessionId = null;
   state.tabId = null;
+  state.groupId = null;
   await chrome.storage.local.remove(STORAGE_KEY);
 }
 
@@ -93,10 +98,16 @@ async function getTab(tabId) {
 }
 
 /// The tab this session's tools run against. Keeps the stored binding while
-/// that tab exists; if it was closed (or never recorded), adopts the tab the
-/// user is looking at now, as long as it's a web page. Returns null otherwise.
+/// that tab exists; if it was closed (or never recorded), falls back to another
+/// of the session's tabs, then to the tab the user is looking at now, as long
+/// as it's a web page. Returns null otherwise.
 async function resolveSessionTab() {
   let tab = await getTab(state.tabId);
+  if (!tab && state.groupId != null) {
+    const others = await sessionTabs({ tabId: null, groupId: state.groupId }).catch(() => []);
+    tab = others.find((t) => /^https?:\/\//.test(t.url || "")) || null;
+    if (tab && state.sessionId) await saveActiveSession(state.sessionId, tab.id);
+  }
   if (!tab) {
     const active = await getActiveTab().catch(() => null);
     if (!active?.url || !/^https?:\/\//.test(active.url)) return null;
@@ -366,21 +377,28 @@ async function runToolLoop(turn) {
 }
 
 /// Run one batch of extension-side tool calls, post the results, and return the
-/// backend's next turn. Tools can navigate the tab; `state.tabId` stays fixed
-/// and the session on the backend carries straight on into the new page.
+/// backend's next turn. Tools can navigate the tab — or, for another site, move
+/// the session to a different tab in its group — and the session on the
+/// backend carries straight on into the new page.
 async function runCallsAndContinue(calls) {
   // The session's tab may have been closed mid-run; carry on in the user's
   // current tab rather than failing on a dead id.
   const tab = await resolveSessionTab();
   if (!tab) throw new Error("The session's tab is gone — open a web page and hit Send to continue.");
+  const ctx = { tabId: state.tabId, groupId: state.groupId };
+  await ensureGroup(ctx);
   const results = [];
   for (const call of calls) {
     if (state.stopRequested) break;
     appendToolCallBubble(call);
     setStatus(`Running ${call.tool}…`);
-    const r = await runTool(state.tabId, call, (m) => {
+    const r = await runTool(ctx, call, (m) => {
       if (!state.stopRequested) setStatus(`${call.tool}: ${m}`);
     });
+    if (ctx.tabId !== state.tabId || ctx.groupId !== state.groupId) {
+      await saveActiveSession(state.sessionId, ctx.tabId, ctx.groupId);
+      renderHeader();
+    }
     setToolStatus(call.call_id, describeResult(call.tool, r), !!r.error);
     results.push(r);
   }
@@ -389,7 +407,7 @@ async function runCallsAndContinue(calls) {
     // tell the backend to stand down (best-effort; an in-flight request may
     // re-mark the session active, so cancel lands last and wins).
     setStatus("Stopping…");
-  detachDebugger(state.tabId);
+    detachDebugger();
     try { await backend.cancelSession(state.sessionId); } catch {}
     await refreshArtifact();
     setStatus("Stopped.", "");
@@ -409,7 +427,10 @@ async function runCallsAndContinue(calls) {
 function describeResult(tool, r) {
   if (r.error) return `error: ${r.error}`;
   if (r.result?.navigated) return `page navigated → ${shortUrl(r.result.to)}`;
-  if (tool === "navigate") return `→ ${shortUrl(r.result?.url)}`;
+  if (tool === "navigate") {
+    const via = r.result?.tab === "new" ? " (new tab)" : r.result?.tab === "switched" ? " (switched tab)" : "";
+    return `→ ${shortUrl(r.result?.url)}${via}`;
+  }
   if (tool === "screenshot") return "captured";
   if (tool === "execute_script") {
     const items = r.result?.items;
@@ -468,7 +489,9 @@ async function onSend() {
       const signals = await collectSignals(state.tabId);
       setStatus("Starting the agent…");
       const res = await backend.createSession({ url: tab.url, intention: text, signals });
-      await saveActiveSession(res.session_id, tab.id);
+      const ctx = { tabId: tab.id, groupId: null };
+      await ensureGroup(ctx, text);
+      await saveActiveSession(res.session_id, tab.id, ctx.groupId);
       setActiveMode();
       renderHeader();
       appendUserTurn(text);
@@ -491,7 +514,7 @@ async function onStop() {
   state.stopRequested = true;
   $("stop").disabled = true;
   setStatus("Stopping…");
-  detachDebugger(state.tabId);
+  detachDebugger();
   try { await backend.cancelSession(state.sessionId); } catch (e) {
     setStatus(`Stop failed (${e.message || e}) — closing the panel also halts the run.`, "error");
   }
@@ -504,7 +527,7 @@ async function onNewSession() {
     try { await backend.cancelSession(state.sessionId); } catch {}
   }
   state.running = false;
-  await detachDebugger(state.tabId);
+  await detachDebugger();
   await clearActiveSession();
   resetUiForNew();
   await renderHeader();
@@ -513,7 +536,7 @@ async function onNewSession() {
 
 // ───────────────────────── restore on open ──────────────────────────────────
 
-async function restoreSession({ sessionId, tabId }) {
+async function restoreSession({ sessionId, tabId, groupId = null }) {
   let info;
   try {
     info = await backend.fetchSession(sessionId);
@@ -524,6 +547,7 @@ async function restoreSession({ sessionId, tabId }) {
   }
   state.sessionId = sessionId;
   state.tabId = tabId;
+  state.groupId = groupId;
   setActiveMode();
   await renderHeader();
 

@@ -27,7 +27,9 @@ extracted, then reply with a short plain-text summary (no tool call) to finish.
   to perform the *final extraction*.
 - `navigate({ url, wait_ms? })` — move the tab to another URL and wait for the
   load to finish; returns `{ url, title }`. Relative URLs resolve against the
-  current page. **This is the only safe way to change pages.**
+  current page. **This is the only safe way to change pages.** Going to a
+  *different site* opens it in a new tab of your session (or switches back to
+  the tab already open on that site) — see "One tab per site" below.
 - `screenshot({})` — capture the visible page as an image (returned to you). Use
   it only when the DOM/JSON structure is unclear and seeing the layout helps.
 - `page_to_markdown({})` — dump the live page as Markdown into your file store
@@ -63,6 +65,19 @@ losing everything it was holding in local variables. So:
   `execute_script` and expect the rest of that script to run.
 - If it happens anyway you get back `{ navigated: true, from, to }` instead of
   your return value. Nothing was saved. Re-extract on the page you landed on.
+
+### One tab per site
+
+Your session keeps one tab per site (registrable domain), grouped together in
+the browser. `navigate` within the current site reuses the current tab; to a
+different site it opens a new tab (result has `tab: "new"`) and leaves the
+previous tab exactly as it was. `navigate` back to a site you already have open
+switches to its tab (`tab: "switched"`), and if the URL is the page that tab is
+already on it is **not reloaded** — a half-filled form is still there. So when
+a task needs information from another site (e.g. reading a resume while filling
+a profile form), just `navigate` there, read what you need, then `navigate`
+back to the form's URL and carry on. Every tool acts on whichever tab you last
+navigated to.
 
 ### Paginating across navigations
 

@@ -12,13 +12,18 @@
 // a silent `null`.
 
 import { DebuggerUnavailable, debuggerAllowed, evaluateInPage } from "./page-debugger.js";
+import { openTab, switchTo, tabForTarget } from "./session-tabs.js";
 
 /// Run one tool call. Always resolves; failures come back as { error } so the
-/// agent can see and react to them. `onProgress` receives human-readable
-/// status updates for long waits (navigate / tab settle / LLM round-trip).
-/// A 60s overall cap guarantees we never hang the panel transcript forever.
-export async function runTool(tabId, call, onProgress) {
+/// agent can see and react to them. `ctx` is the session's tab context
+/// `{ tabId, groupId }`; `navigate` may move `ctx.tabId` to another of the
+/// session's tabs, so callers should read it back afterwards. `onProgress`
+/// receives human-readable status updates for long waits (navigate / tab
+/// settle / LLM round-trip). A 60s overall cap guarantees we never hang the
+/// panel transcript forever.
+export async function runTool(ctx, call, onProgress) {
   const { call_id, tool, args } = call;
+  const tabId = ctx.tabId;
   const progress = (m) => { try { onProgress?.(m); } catch {} };
   try {
     let result;
@@ -34,7 +39,7 @@ export async function runTool(tabId, call, onProgress) {
         tool,
       );
     } else if (tool === "navigate") {
-      result = await capped(navigate(tabId, args?.url, args?.wait_ms, progress), tool);
+      result = await capped(navigate(ctx, args?.url, args?.wait_ms, progress), tool);
     } else if (tool === "screenshot") {
       result = await capped(withPageReady(tabId, () => screenshot(tabId, progress), progress), tool);
     } else if (tool === "page_to_markdown") {
@@ -191,10 +196,14 @@ function watchNavigation(tabId) {
   return w;
 }
 
-/// Move the tab to `url` and resolve once the new page has loaded. This is the
-/// agent's supported way to change pages: the backend session is untouched, so
-/// the next tool call simply runs against the new document.
-async function navigate(tabId, url, waitMs, onProgress) {
+/// Move the session to `url` and resolve once the new page has loaded. This is
+/// the agent's supported way to change pages: the backend session is
+/// untouched, so the next tool call simply runs against the new document.
+///
+/// Within a site this navigates the current tab. A different site gets its own
+/// tab in the session's group (reusing one already open on that site), so the
+/// page being left — and any form state on it — survives the detour.
+async function navigate(ctx, url, waitMs, onProgress) {
   if (!url || typeof url !== "string") throw new Error("`url` is required");
   const progress = (m) => { try { onProgress?.(m); } catch {} };
   // Settle any load already in flight first. Otherwise its `complete` event
@@ -202,7 +211,8 @@ async function navigate(tabId, url, waitMs, onProgress) {
   // the page it was leaving. It also makes `current` the real base for a
   // relative URL.
   progress("Settling current page…");
-  const current = (await waitUntilComplete(tabId, 10000)).url ?? null;
+  const currentTab = await waitUntilComplete(ctx.tabId, 10000);
+  const current = currentTab.url ?? null;
   let target;
   try {
     target = current ? new URL(url, current).href : new URL(url).href;
@@ -211,11 +221,27 @@ async function navigate(tabId, url, waitMs, onProgress) {
   }
   assertScriptableUrl(target);
 
-  // Listener first: tabs.update can complete the load before we could attach it.
-  progress(`Navigating to ${target}…`);
-  const loaded = waitForLoad(tabId, target, 15000, progress);
-  await chrome.tabs.update(tabId, { url: target });
-  await loaded;
+  const { tab: dest, kind } = await tabForTarget(ctx, currentTab, target);
+  if (kind === "new") {
+    progress(`Opening ${target} in a new tab…`);
+    const opened = await openTab(ctx, currentTab, target);
+    await waitUntilComplete(opened.id, 15000);
+  } else {
+    if (kind === "existing") {
+      progress("Switching to the session's tab for that site…");
+      await switchTo(ctx, dest);
+      await waitUntilComplete(dest.id, 10000);
+    }
+    // Returning to a page that's already open (say, a form left mid-way) must
+    // not reload it and wipe what was entered.
+    if (!(kind === "existing" && sameDocument(dest.url, target))) {
+      // Listener first: tabs.update can complete the load before we could attach it.
+      progress(`Navigating to ${target}…`);
+      const loaded = waitForLoad(dest.id, target, 15000, progress);
+      await chrome.tabs.update(dest.id, { url: target });
+      await loaded;
+    }
+  }
 
   const settle = Math.min(Math.max(Number(waitMs ?? 500) || 0, 0), 15000);
   if (settle) {
@@ -223,9 +249,21 @@ async function navigate(tabId, url, waitMs, onProgress) {
     await sleep(settle);
   }
 
-  const tab = await chrome.tabs.get(tabId);
+  const tab = await chrome.tabs.get(ctx.tabId);
   assertScriptableUrl(tab.url);
-  return { url: tab.url, title: tab.title ?? null, from: current };
+  const out = { url: tab.url, title: tab.title ?? null, from: current };
+  if (kind === "new") {
+    out.tab = "new";
+    out.note =
+      "This is a different site, so it opened in a new tab of your session. The previous " +
+      "tab is kept exactly as you left it; `navigate` to that site again to switch back.";
+  } else if (kind === "existing") {
+    out.tab = "switched";
+    out.note =
+      "Switched back to this site's existing tab in your session" +
+      (sameDocument(dest.url, target) ? " without reloading, so its page state is intact." : ".");
+  }
+  return out;
 }
 
 /// Resolve when the tab finishes the load we just started. Chrome reports a

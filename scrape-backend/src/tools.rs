@@ -179,7 +179,10 @@ pub fn catalog() -> Vec<Tool> {
             })),
         Tool::new(NAVIGATE)
             .with_description(
-                "Navigate the live tab to another URL and wait for the new page to finish loading.                  Returns `{ url, title }` for the page you landed on. THIS IS THE ONLY SAFE WAY TO CHANGE                  PAGES: your session survives navigation, but an `execute_script` context does not — a script                  that clicks a link or a pagination control is killed mid-run and everything it held in                  memory is lost. So never navigate from inside `execute_script`. Instead: extract the                  current page (with `append: true`), call `navigate` with the next page's URL, extract again.                  Relative URLs are resolved against the current page; only http(s) URLs are allowed.",
+                "Navigate the live tab to another URL and wait for the new page to finish loading.                  Returns `{ url, title }` for the page you landed on. THIS IS THE ONLY SAFE WAY TO CHANGE                  PAGES: your session survives navigation, but an `execute_script` context does not — a script                  that clicks a link or a pagination control is killed mid-run and everything it held in                  memory is lost. So never navigate from inside `execute_script`. Instead: extract the                  current page (with `append: true`), call `navigate` with the next page's URL, extract again.                  Relative URLs are resolved against the current page; only http(s) URLs are allowed. \
+                 A URL on a DIFFERENT SITE opens in a new tab of your session (`tab: \"new\"`), leaving the \
+                 current tab untouched; navigating back to a site already open switches to its tab \
+                 (`tab: \"switched\"`) without reloading if the URL is the page it is already on.",
             )
             .with_schema(json!({
                 "type": "object",
