@@ -3,6 +3,9 @@
 // (extension origin → http://localhost works without host_permissions in MV3).
 
 const DEFAULT_BASE = "http://localhost:4546";
+// Calls that advance the agent run every server-side step inline, and a step
+// may now include sandbox commands (up to the backend's 120s cap each).
+const ADVANCE_TIMEOUT_MS = 300000;
 
 function baseUrl() {
   // Future: read from chrome.storage.sync; for now a constant.
@@ -63,17 +66,38 @@ async function parseResponse(res) {
   return parsed;
 }
 
+async function postForm(path, form, { timeoutMs = 120000 } = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(baseUrl() + path, { method: "POST", body: form, signal: ctrl.signal });
+    return parseResponse(res);
+  } catch (e) {
+    if (e?.name === "AbortError") throw new Error(`upload timed out after ${Math.round(timeoutMs / 1000)}s`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export const backend = {
-  createSession({ url, intention, signals }) {
-    return postJson("/api/sessions", { url, intention, signals });
+  // `attachments` are upload ids from `uploadFiles`.
+  createSession({ url, intention, signals, attachments = [] }) {
+    return postJson("/api/sessions", { url, intention, signals, attachments }, { timeoutMs: ADVANCE_TIMEOUT_MS });
   },
-  sendMessage(sessionId, content) {
-    return postJson(`/api/sessions/${sessionId}/message`, { content });
+  sendMessage(sessionId, content, attachments = []) {
+    return postJson(`/api/sessions/${sessionId}/message`, { content, attachments }, { timeoutMs: ADVANCE_TIMEOUT_MS });
+  },
+  // Stage files for the next message; resolves { uploads: [{ upload_id, name, size }] }.
+  uploadFiles(files) {
+    const form = new FormData();
+    for (const f of files) form.append("file", f, f.name);
+    return postForm("/api/uploads", form);
   },
   // Post the results of the extension-side tools the agent asked us to run.
   // `results` is an array of { call_id, tool, result } | { call_id, tool, error }.
   sendToolResult(sessionId, results) {
-    return postJson(`/api/sessions/${sessionId}/tool_result`, { results });
+    return postJson(`/api/sessions/${sessionId}/tool_result`, { results }, { timeoutMs: ADVANCE_TIMEOUT_MS });
   },
   cancelSession(sessionId) {
     return postJson(`/api/sessions/${sessionId}/cancel`, {}, { timeoutMs: 15000 });

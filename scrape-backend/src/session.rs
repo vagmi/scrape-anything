@@ -64,6 +64,7 @@ pub async fn create(
     url: String,
     intention: String,
     signals: Signals,
+    attachments: Vec<String>,
 ) -> AppResult<(String, Turn)> {
     if url.is_empty() {
         return Err(AppError::BadSignals("url is required".into()));
@@ -92,6 +93,7 @@ pub async fn create(
     .await?;
 
     insert_turn(state.db(), &session_id, 0, "extension", "signals", &signals_json).await?;
+    attach_files(state, &session_id, &attachments).await?;
 
     let turn = advance(state, &session_id).await?;
     Ok((session_id, turn))
@@ -103,6 +105,7 @@ pub async fn handle_message(
     state: &AppState,
     session_id: &str,
     content: String,
+    attachments: Vec<String>,
 ) -> AppResult<Turn> {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -110,6 +113,7 @@ pub async fn handle_message(
     }
     session_must_exist(state.db(), session_id).await?;
     mark_status(state.db(), session_id, "active").await?;
+    attach_files(state, session_id, &attachments).await?;
 
     let idx = next_index(state.db(), session_id).await?;
     let payload = json!({ "content": trimmed }).to_string();
@@ -122,6 +126,26 @@ pub async fn handle_message(
     );
     insert_turn(state.db(), session_id, idx, "user", "message", &payload).await?;
     advance(state, session_id).await
+}
+
+/// Move staged uploads into the session's workspace and record a
+/// `user/attachment` turn describing them (path, size, preview), which
+/// `agent::build_messages` turns into a note the model reads.
+async fn attach_files(state: &AppState, session_id: &str, upload_ids: &[String]) -> AppResult<()> {
+    if upload_ids.is_empty() {
+        return Ok(());
+    }
+    let sandbox = state.sandbox();
+    let files = crate::workspace::attach(sandbox.data_dir(), &sandbox.workspace(session_id), upload_ids)
+        .map_err(AppError::BadSignals)?;
+    tracing::info!(
+        target: "scrape_backend::session",
+        %session_id, files = files.len(), "files attached"
+    );
+    let idx = next_index(state.db(), session_id).await?;
+    let payload = json!({ "files": files }).to_string();
+    insert_turn(state.db(), session_id, idx, "user", "attachment", &payload).await?;
+    Ok(())
 }
 
 /// Results from the extension for the tools it just ran. Persists a
@@ -328,7 +352,8 @@ async fn advance(state: &AppState, session_id: &str) -> AppResult<Turn> {
         let mut pending: Vec<PendingCall> = Vec::new();
         for call in &step.tool_calls {
             if tools::is_server_side(&call.fn_name) {
-                let resp = tools::run_server_tool(db, &host, call).await;
+                let cx = tools::ToolCx { state, origin: &host, session_id };
+                let resp = tools::run_server_tool(&cx, call).await;
                 persist_tool_response(db, session_id, &call.fn_name, &resp.call_id, &resp.content, None, None)
                     .await?;
             } else {
@@ -360,7 +385,7 @@ async fn advance(state: &AppState, session_id: &str) -> AppResult<Turn> {
 /// (duplicates dropped) — that is what lets one session gather a listing that
 /// spans several pages, where each page is a separate `execute_script` run
 /// because navigating tears the previous page's context down.
-async fn maybe_store_artifact(db: &SqlitePool, session_id: &str, result: &Value) -> AppResult<()> {
+pub(crate) async fn maybe_store_artifact(db: &SqlitePool, session_id: &str, result: &Value) -> AppResult<()> {
     let Some(items) = result.get("items").and_then(|v| v.as_array()) else {
         return Ok(());
     };
@@ -405,7 +430,7 @@ async fn maybe_store_artifact(db: &SqlitePool, session_id: &str, result: &Value)
 }
 
 /// Rows already collected for this session, or an empty vec if there are none.
-async fn existing_items(db: &SqlitePool, session_id: &str) -> AppResult<Vec<Value>> {
+pub(crate) async fn existing_items(db: &SqlitePool, session_id: &str) -> AppResult<Vec<Value>> {
     let row: Option<(String,)> =
         sqlx::query_as("SELECT items_json FROM artifacts WHERE session_id = ?1")
             .bind(session_id)

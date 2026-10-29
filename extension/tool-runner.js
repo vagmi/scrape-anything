@@ -11,8 +11,9 @@
 // when one does kill a script, tell the agent exactly that instead of handing it
 // a silent `null`.
 
-import { DebuggerUnavailable, debuggerAllowed, evaluateInPage } from "./page-debugger.js";
+import { DebuggerUnavailable, debuggerAllowed, evaluateInPage, setBindingHandler } from "./page-debugger.js";
 import { openTab, switchTo, tabForTarget } from "./session-tabs.js";
+import { click, hover, pressKey, scroll, typeText } from "./page-input.js";
 
 /// Run one tool call. Always resolves; failures come back as { error } so the
 /// agent can see and react to them. `ctx` is the session's tab context
@@ -52,6 +53,23 @@ export async function runTool(ctx, call, onProgress) {
     return { call_id, tool, error: String(e?.message || e) };
   }
 }
+
+// `human.*` inside execute_script: trusted mouse/keyboard input through CDP's
+// Input domain, human-paced (see page-input.js / page-debugger.js).
+const HUMAN_OPS = { click, hover, type: typeText, press: pressKey, scroll };
+
+setBindingHandler(async (tabId, op, args) => {
+  const fn = HUMAN_OPS[op];
+  if (!fn) throw new Error(`unknown human.${op}`);
+  // Background tabs don't paint, so a dropdown opened by a click would never
+  // render — act with the tab in front, as a person would.
+  const tab = await chrome.tabs.get(tabId);
+  if (!tab.active) {
+    await chrome.tabs.update(tabId, { active: true });
+    await sleep(200);
+  }
+  return await fn(tabId, args);
+});
 
 // A navigation (link click, redirect, or a load the agent's own script kicked
 // off) can leave the tab mid-load or its frame torn down, so tool calls fire
@@ -350,7 +368,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function executeScript(tabId, code) {
   if (debuggerAllowed()) {
     try {
-      return await evaluateInPage(tabId, code);
+      return await evaluateInPage(tabId, code, { human: true });
     } catch (e) {
       // Only fall back when nothing ran: once attached, an error belongs to the
       // agent's script, and re-running it elsewhere could repeat its side effects.
@@ -370,7 +388,11 @@ async function executeUserScript(tabId, code) {
       'chrome://extensions and toggle "Allow User Scripts" for this extension.'
     );
   }
-  const wrapped = `(async function(){\n${code}\n})()`;
+  // No CDP here, so no trusted input: make `human.*` fail with a clear reason.
+  const stub =
+    'const human = new Proxy({}, { get: () => () => Promise.reject(new Error(' +
+    '"human.* needs the debugger, which is unavailable (the user may have dismissed its infobar)")) });';
+  const wrapped = `(async function(){\n${stub}\nreturn await (async function(){\n${code}\n})();\n})()`;
   let results;
   try {
     results = await chrome.userScripts.execute({

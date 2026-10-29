@@ -23,14 +23,19 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Deserialize)]
-pub struct MessageReq { pub content: String }
+pub struct MessageReq {
+    pub content: String,
+    /// Upload ids from `POST /api/uploads` to attach with this message.
+    #[serde(default)]
+    pub attachments: Vec<String>,
+}
 
 async fn message(
     State(s): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<MessageReq>,
 ) -> AppResult<Json<TurnResp>> {
-    let turn = session::handle_message(&s, &id, req.content).await?;
+    let turn = session::handle_message(&s, &id, req.content, req.attachments).await?;
     Ok(Json(TurnResp { turn }))
 }
 
@@ -39,6 +44,8 @@ pub struct CreateReq {
     pub url: String,
     pub intention: String,
     pub signals: Signals,
+    #[serde(default)]
+    pub attachments: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -48,7 +55,7 @@ pub struct CreateResp {
 }
 
 async fn create(State(s): State<AppState>, Json(req): Json<CreateReq>) -> AppResult<Json<CreateResp>> {
-    let (session_id, turn) = session::create(&s, req.url, req.intention, req.signals).await?;
+    let (session_id, turn) = session::create(&s, req.url, req.intention, req.signals, req.attachments).await?;
     Ok(Json(CreateResp { session_id, turn }))
 }
 

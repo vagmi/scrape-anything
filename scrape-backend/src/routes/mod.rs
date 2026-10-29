@@ -6,6 +6,7 @@ use tower_http::trace::TraceLayer;
 use crate::state::AppState;
 
 pub mod data;
+pub mod files;
 pub mod plans;
 pub mod sessions;
 
@@ -29,6 +30,7 @@ pub fn build(state: AppState) -> Router {
         .merge(sessions::router())
         .merge(plans::router())
         .merge(data::router())
+        .merge(files::router(state.config().sandbox.max_upload_bytes))
         .fallback_service(spa)
         .layer(cors)
         .layer(TraceLayer::new_for_http())

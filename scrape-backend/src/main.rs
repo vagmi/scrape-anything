@@ -7,10 +7,13 @@ mod edit_ops;
 mod error;
 mod llm;
 mod routes;
+mod sandbox;
 mod session;
 mod signals;
+mod skills;
 mod state;
 mod tools;
+mod workspace;
 
 use anyhow::{Context, Result};
 use tracing_subscriber::EnvFilter;
@@ -34,7 +37,10 @@ async fn main() -> Result<()> {
     let llm = llm::LlmClient::from_config(&cfg.llm)?;
     tracing::info!(provider = %cfg.llm.provider, model = %cfg.llm.model, "llm client ready");
 
-    let state = state::AppState::new(cfg.clone(), pool, llm);
+    let sandbox = std::sync::Arc::new(sandbox::Sandbox::init(cfg.sandbox.clone()).await?);
+    sandbox.spawn_reaper();
+
+    let state = state::AppState::new(cfg.clone(), pool, llm, sandbox);
     let app = routes::build(state);
 
     let addr = format!("{}:{}", cfg.server.host, cfg.server.port);

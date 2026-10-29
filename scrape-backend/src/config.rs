@@ -12,6 +12,51 @@ pub struct Config {
     pub routes: Vec<HostRoutes>,
     #[serde(default)]
     pub dashboard: Dashboard,
+    #[serde(default)]
+    pub sandbox: Sandbox,
+}
+
+/// Docker sandbox for file analysis (`run_command`) plus the per-session
+/// workspace that uploads land in. See `crate::sandbox`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Sandbox {
+    /// Advertise `run_command` (still requires the image to be present).
+    pub enabled: bool,
+    pub image: String,
+    /// Root for session workspaces (`sessions/<id>/`) and staged uploads.
+    pub data_dir: String,
+    /// `docker run --memory` / `--cpus` / `--pids-limit`.
+    pub memory: String,
+    pub cpus: String,
+    pub pids_limit: u32,
+    /// Default and maximum per-command timeout.
+    pub command_timeout_secs: u64,
+    pub max_command_timeout_secs: u64,
+    /// stdout/stderr are each clipped to this many bytes in the tool result.
+    pub max_output_bytes: usize,
+    /// Remove a session's container after this long without a command.
+    pub idle_ttl_secs: u64,
+    /// Per-request cap on `POST /api/uploads`.
+    pub max_upload_bytes: usize,
+}
+
+impl Default for Sandbox {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            image: "scrape-sandbox:0.1".into(),
+            data_dir: "./data".into(),
+            memory: "1g".into(),
+            cpus: "1".into(),
+            pids_limit: 512,
+            command_timeout_secs: 30,
+            max_command_timeout_secs: 120,
+            max_output_bytes: 32 * 1024,
+            idle_ttl_secs: 30 * 60,
+            max_upload_bytes: 100 * 1024 * 1024,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

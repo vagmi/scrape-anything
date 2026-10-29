@@ -54,3 +54,9 @@ export interface OriginFile {
   content: string;
   updated_at: number;
 }
+
+/** A file in a session's workspace (uploads, agent outputs). */
+export interface WorkspaceFile {
+  path: string; // "work/uploads/leads.csv"
+  size: number;
+}

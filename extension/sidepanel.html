@@ -58,14 +58,19 @@
       <label id="composer-label" for="message" class="mb-1.5 block text-xs font-medium text-muted">
         What do you want extracted?
       </label>
-      <div class="composer">
+      <div id="composer" class="composer">
+        <div id="attachments" class="hidden flex flex-wrap gap-1.5 px-2 pt-2"></div>
         <textarea
           id="message"
           rows="3"
           placeholder="e.g. all upcoming tech events with title, url, and start time"
         ></textarea>
         <div class="flex items-center gap-2 px-2 pb-2">
-          <span class="flex-1 pl-1 text-[11px] text-muted">⌘ ↵ to send</span>
+          <button id="attach" class="btn btn-ghost px-1.5" title="Attach files (CSV, JSON, …) for the agent to analyze">
+            <svg class="icon" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>
+          </button>
+          <input id="file-input" type="file" multiple class="hidden" />
+          <span class="flex-1 text-[11px] text-muted">⌘ ↵ to send</span>
           <button id="stop" class="btn btn-danger hidden">
             <svg class="icon" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5" /></svg>
             Stop

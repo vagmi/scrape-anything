@@ -32,3 +32,20 @@ host = "lu.ma"
 patterns = [
   { match = "^/[^/]+$", replace = "/:slug" },
 ]
+
+[sandbox]
+# Docker sandbox for file analysis. Build the image first:
+#   docker build -t scrape-sandbox:0.1 sandbox
+# Without the image the backend still runs; `run_command` is just not offered.
+enabled = true
+image = "scrape-sandbox:0.1"
+# Session workspaces (sessions/<id>/ → /work in the container) and staged uploads.
+data_dir = "./data"
+memory = "1g"
+cpus = "1"
+pids_limit = 512
+command_timeout_secs = 30
+max_command_timeout_secs = 120
+max_output_bytes = 32768
+idle_ttl_secs = 1800
+max_upload_bytes = 104857600

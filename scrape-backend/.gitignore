@@ -2,3 +2,4 @@
 /scrape.db
 /scrape.db-*
 .env
+/data

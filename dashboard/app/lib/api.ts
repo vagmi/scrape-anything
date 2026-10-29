@@ -4,6 +4,7 @@ import type {
   OriginFiles,
   SessionDetail,
   SessionListItem,
+  WorkspaceFile,
 } from "./types";
 
 // Same-origin in production (the Rust backend serves this SPA). In dev, Vite
@@ -29,6 +30,12 @@ export const api = {
     get<OriginFiles>(`/api/origins/${encodeURIComponent(host)}/files`),
   originFile: (host: string, path: string) =>
     get<OriginFile>(`/api/origins/${encodeURIComponent(host)}/files/${path}`),
+
+  sessionFiles: (id: string) =>
+    get<{ files: WorkspaceFile[] }>(`/api/sessions/${id}/files`),
+  // `path` as listed ("work/out/rows.json"); the route takes it relative to the workspace.
+  sessionFileUrl: (id: string, path: string) =>
+    `${BASE}/api/sessions/${id}/files/${path.replace(/^work\//, "")}`,
 
   artifactDownloadUrl: (artifactId: string, fmt: "json" | "csv") =>
     `${BASE}/api/artifacts/${artifactId}.${fmt}`,

@@ -36,7 +36,7 @@ pub async fn step(state: &AppState, session_id: &str) -> AppResult<Step> {
     let session = load_session(db, session_id).await?;
     let messages = build_messages(db, session_id, &session).await?;
 
-    let req = ChatRequest::from_messages(messages).with_tools(tools::catalog());
+    let req = ChatRequest::from_messages(messages).with_tools(tools::catalog(state.sandbox().available()));
     let opts = ChatOptions::default();
 
     tracing::debug!(
@@ -142,6 +142,10 @@ async fn build_messages(
                 let content = v.get("content").and_then(|c| c.as_str()).unwrap_or(payload.as_str());
                 out.push(ChatMessage::user(content.to_string()));
             }
+            ("user", "attachment") => {
+                let v: Value = serde_json::from_str(payload).unwrap_or_default();
+                out.push(ChatMessage::user(attachment_note(&v)));
+            }
             ("llm", "assistant") => {
                 let v: Value = serde_json::from_str(payload).unwrap_or_default();
                 let calls = parse_stored_tool_calls(&v);
@@ -192,6 +196,25 @@ fn parse_stored_tool_calls(v: &Value) -> Vec<ToolCall> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The note the model sees for a `user/attachment` turn: where each upload is
+/// and its preview, so a first parsing script can be written without probing.
+fn attachment_note(v: &Value) -> String {
+    let files = v.get("files").and_then(|f| f.as_array()).cloned().unwrap_or_default();
+    let mut note = String::from(
+        "The user attached files. They are in your session workspace — `work/uploads/...` in the file \
+         tools, `/work/uploads/...` inside run_command. Analyze them with scripts in the sandbox \
+         (see skills/file-analysis.md) rather than reading them whole.\n",
+    );
+    for f in &files {
+        let path = f.get("path").and_then(|p| p.as_str()).unwrap_or("?");
+        let size = f.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+        let preview = f.get("preview").map(|p| p.to_string()).unwrap_or_default();
+        // Previews are already bounded (a few clipped rows) by `workspace::preview`.
+        note.push_str(&format!("\n- {path} ({size} bytes)\n  preview: {preview}"));
+    }
+    note
 }
 
 /// Compact listing of the origin's memory files for the opening prompt.

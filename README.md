@@ -35,6 +35,23 @@ Listens on `http://localhost:4546`, serves the dashboard at
 next to the binary on first run. Set `RUST_LOG=scrape_backend=debug` to see the
 full Gemini I/O per turn; `RUST_LOG=scrape_backend=info` for quieter output.
 
+### File-analysis sandbox (optional)
+
+Files attached in the side panel (CSV, JSON, …) are analyzed by the agent with
+scripts in a per-session Docker container (python3 + pandas + duckdb, bun, jq;
+network on). Build the image once:
+
+```sh
+cd scrape-backend
+docker build -t scrape-sandbox:0.1 sandbox
+```
+
+Without the image the backend still starts and logs a warning; it just doesn't
+offer `run_command`. Session workspaces live under `./data/sessions/<id>/`
+(bind-mounted at `/work`), and the `[sandbox]` section of `config.toml` sets limits and
+timeouts. Idle containers are removed after `idle_ttl_secs`. Run
+`cargo test -- --ignored sandbox_runs` to check the sandbox end to end.
+
 ## Build the dashboard
 
 The dashboard is a React Router (framework mode, SPA / `ssr:false`) app with
@@ -116,7 +133,9 @@ reuses a scraper or notes it saved earlier.
 
 | tool | where it runs | purpose |
 |---|---|---|
-| `list_files` / `read_file` / `write_file` / `edit_file` | backend (SQLite) | the agent's persistent per-origin memory |
+| `list_files` / `read_file` / `write_file` / `edit_file` / `search_file` / `concat_files` | backend (SQLite + workspace) | the agent's persistent per-origin memory; `work/...` paths hit the session workspace (uploads, scripts) |
+| `run_command` | backend → Docker sandbox | shell in the session's container, `/work` = workspace; for analyzing uploaded files |
+| `save_result` | backend | turn a JSON file of rows from the workspace into the session's artifact |
 | `execute_script` | extension (`chrome.userScripts`) | run JS in the page — probe structure and do the final extraction |
 | `screenshot` | extension (`captureVisibleTab`) | send the page image to Gemini (multimodal) when structure is unclear |
 
@@ -181,11 +200,15 @@ return { kind: "listing", items };
 - `src/agent.rs` — one function-calling Gemini step; replays the turn log
   (assistant tool calls, tool responses, screenshot images) into the chat.
 - `src/session.rs` — session lifecycle, the tool loop, artifact upsert.
-- `src/tools.rs` — the 6 `Tool`s + server-side file-store dispatch.
+- `src/tools.rs` — the `Tool` catalog + server-side dispatch (file store, workspace, sandbox).
+- `src/workspace.rs` — per-session workspace dir: path guards, upload staging/attach, file previews.
+- `src/sandbox.rs` — per-session Docker container lifecycle, `docker exec` with timeouts/output clipping, idle reaper.
+- `src/skills/` — built-in read-only guides (`human-input.md`, `file-analysis.md`).
+- `sandbox/Dockerfile` — the sandbox image.
 - `src/edit_ops.rs` — exact-once `string_replace` for `edit_file` (ported from slop).
 - `src/csv.rs` — CSV serializer for artifact downloads.
 - `src/routes/` — `sessions.rs`, `plans.rs`, `data.rs` (list/artifact/files
-  JSON + downloads); `mod.rs` also serves the SPA build with an index.html
+  JSON + downloads), `files.rs` (uploads + session workspace downloads); `mod.rs` also serves the SPA build with an index.html
   fallback.
 - `src/prompts/system.md` — the agent's system prompt.
 - `migrations/0001_initial.sql` — `sessions`, `turns`, `plans` tables.

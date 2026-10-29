@@ -18,6 +18,7 @@ const state = {
   toolEls: new Map(), // call_id -> tool bubble element
   running: false, // an agent loop is driving tools right now
   stopRequested: false, // user hit Stop; loop checks this between steps
+  pendingFiles: [], // File objects to upload with the next message
 };
 
 // ─────────────────────────── UI helpers ─────────────────────────────────────
@@ -48,6 +49,8 @@ function resetUiForNew() {
   $("composer-label").textContent = "What do you want extracted?";
   $("message").value = "";
   $("send").textContent = "Scrape";
+  state.pendingFiles = [];
+  renderPendingFiles();
   setStatus("");
 }
 
@@ -218,7 +221,84 @@ async function collectSignals(tabId) {
   return result;
 }
 
+// ─────────────────────────── attachments ────────────────────────────────────
+
+const FILE_ICON =
+  '<svg class="icon" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>';
+
+function formatSize(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/// A file chip; `onRemove` adds an × button (composer chips only).
+function fileChip(name, size, onRemove) {
+  const chip = document.createElement("span");
+  chip.className = "file-chip";
+  chip.title = size != null ? `${name} (${formatSize(size)})` : name;
+  chip.innerHTML = FILE_ICON;
+  const label = document.createElement("span");
+  label.textContent = name;
+  chip.appendChild(label);
+  if (onRemove) {
+    const x = document.createElement("button");
+    x.type = "button";
+    x.title = "Remove";
+    x.textContent = "×";
+    x.addEventListener("click", onRemove);
+    chip.appendChild(x);
+  }
+  return chip;
+}
+
+function addPendingFiles(fileList) {
+  for (const f of fileList) {
+    if (!state.pendingFiles.some((p) => p.name === f.name && p.size === f.size)) state.pendingFiles.push(f);
+  }
+  renderPendingFiles();
+}
+
+function renderPendingFiles() {
+  const box = $("attachments");
+  box.innerHTML = "";
+  state.pendingFiles.forEach((f, i) => {
+    box.appendChild(fileChip(f.name, f.size, () => {
+      state.pendingFiles.splice(i, 1);
+      renderPendingFiles();
+    }));
+  });
+  box.classList.toggle("hidden", !state.pendingFiles.length);
+}
+
+/// Upload the staged files and return their upload ids for the message. The
+/// chips stay until the message carrying them is accepted (`clearPendingFiles`),
+/// so a failed send can simply be retried.
+async function uploadPendingFiles() {
+  if (!state.pendingFiles.length) return { ids: [], files: [] };
+  const n = state.pendingFiles.length;
+  setStatus(`Uploading ${n} file${n === 1 ? "" : "s"}…`);
+  const { uploads } = await backend.uploadFiles(state.pendingFiles);
+  return { ids: uploads.map((u) => u.upload_id), files: uploads };
+}
+
+function clearPendingFiles() {
+  state.pendingFiles = [];
+  renderPendingFiles();
+}
+
 // ────────────────────────── transcript rendering ────────────────────────────
+
+/// Files sent with a message, shown as chips above it. `files` is
+/// [{ name, size }].
+function appendAttachmentTurn(files) {
+  if (!files?.length) return;
+  const el = document.createElement("div");
+  el.className = "turn attachment";
+  for (const f of files) el.appendChild(fileChip(f.name, f.size));
+  $("transcript").appendChild(el);
+  scrollTranscript();
+}
 
 function appendUserTurn(content) {
   const el = document.createElement("div");
@@ -260,12 +340,17 @@ function appendToolCallBubble(call) {
     ? (call.args?.code ?? "")
     : call.tool === "navigate"
       ? (call.args?.url ?? "")
-      : JSON.stringify(call.args ?? {}, null, 2);
+      : call.tool === "run_command"
+        ? (call.args?.command ?? "")
+        : JSON.stringify(call.args ?? {}, null, 2);
   if (detailText && detailText !== "{}") {
     const details = document.createElement("details");
     const summary = document.createElement("summary");
     summary.textContent =
-      call.tool === "execute_script" ? "code" : call.tool === "navigate" ? "url" : "args";
+      call.tool === "execute_script" ? "code"
+        : call.tool === "navigate" ? "url"
+        : call.tool === "run_command" ? "command"
+        : "args";
     const pre = document.createElement("pre");
     pre.textContent = detailText;
     details.appendChild(summary);
@@ -298,6 +383,9 @@ const TOOL_ICONS = {
     '<circle cx="12" cy="12" r="10"/><path d="m16.24 7.76-2.12 6.36-6.36 2.12 2.12-6.36 6.36-2.12z"/>',
   page_to_markdown:
     '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/>',
+  run_command: '<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>',
+  save_result:
+    '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/>',
 };
 const DEFAULT_TOOL_ICON =
   '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>';
@@ -471,7 +559,10 @@ function downloadArtifact(format) {
 async function onSend() {
   if (state.running) return;
   const text = $("message").value.trim();
-  if (!text) { setStatus("Type something first.", "error"); return; }
+  if (!text) {
+    setStatus(state.pendingFiles.length ? "Say what to do with the files." : "Type something first.", "error");
+    return;
+  }
 
   // A new session starts on the tab in front of the user; a follow-up keeps
   // going on the session's own tab, wherever the user happens to be looking.
@@ -484,22 +575,40 @@ async function onSend() {
 
   await drive(async () => {
     let turn;
+    // Upload first: if it fails the message is put back and nothing was sent.
+    let uploaded;
+    try {
+      uploaded = await uploadPendingFiles();
+    } catch (e) {
+      $("message").value = text;
+      throw new Error(`Upload failed: ${e.message || e}`);
+    }
     if (!state.sessionId) {
       setStatus("Collecting page signals…");
       const signals = await collectSignals(state.tabId);
-      setStatus("Starting the agent…");
-      const res = await backend.createSession({ url: tab.url, intention: text, signals });
+      setStatus(uploaded.ids.length ? "Starting the agent (analyzing files)…" : "Starting the agent…");
+      let res;
+      try {
+        res = await backend.createSession({ url: tab.url, intention: text, signals, attachments: uploaded.ids });
+      } catch (e) {
+        $("message").value = text;
+        throw e;
+      }
+      clearPendingFiles();
       const ctx = { tabId: tab.id, groupId: null };
       await ensureGroup(ctx, text);
       await saveActiveSession(res.session_id, tab.id, ctx.groupId);
       setActiveMode();
       renderHeader();
+      appendAttachmentTurn(uploaded.files);
       appendUserTurn(text);
       turn = res.turn;
     } else {
+      appendAttachmentTurn(uploaded.files);
       appendUserTurn(text);
+      clearPendingFiles();
       setStatus("Thinking…");
-      const res = await advanceWithRecovery(() => backend.sendMessage(state.sessionId, text));
+      const res = await advanceWithRecovery(() => backend.sendMessage(state.sessionId, text, uploaded.ids));
       turn = res.turn;
     }
     await runToolLoop(turn);
@@ -551,7 +660,12 @@ async function restoreSession({ sessionId, tabId, groupId = null }) {
   setActiveMode();
   await renderHeader();
 
-  // The opening intention lives on sessions.intention, not as a turn.
+  // The opening intention lives on sessions.intention, not as a turn. Files
+  // attached with it are the attachment turn that directly follows the
+  // signals, shown above the intention as they were when sent.
+  const opening = info.turns.find((t) => t.role !== "extension");
+  const openingFiles = opening?.role === "user" && opening.kind === "attachment" ? opening : null;
+  if (openingFiles) appendAttachmentTurn(openingFiles.payload?.files);
   if (info.intention) appendUserTurn(info.intention);
 
   // Tool calls the backend handed out but never got an answer for. Closing the
@@ -561,7 +675,9 @@ async function restoreSession({ sessionId, tabId, groupId = null }) {
 
   for (const t of info.turns) {
     if (t.role === "extension") continue; // signals / result telemetry
-    if (t.role === "user" && t.kind === "message") {
+    if (t.role === "user" && t.kind === "attachment") {
+      if (t !== openingFiles) appendAttachmentTurn(t.payload?.files);
+    } else if (t.role === "user" && t.kind === "message") {
       appendUserTurn(t.payload?.content || "");
     } else if (t.role === "llm" && t.kind === "assistant") {
       const p = t.payload || {};
@@ -646,6 +762,11 @@ function restoreToolSummary(p) {
     return { text: `error: ${msg}`, err: true };
   }
   if (v && Array.isArray(v.items)) return { text: `${v.items.length} items`, err: false };
+  if (v && typeof v.saved === "number") return { text: `${v.saved} rows saved`, err: false };
+  if (v && "exit_code" in v) {
+    if (v.timed_out) return { text: "timed out", err: true };
+    return { text: `exit ${v.exit_code}`, err: v.exit_code !== 0 };
+  }
   return { text: "ran", err: false };
 }
 
@@ -663,6 +784,24 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("dl-csv").addEventListener("click", () => downloadArtifact("csv"));
   $("message").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); onSend(); }
+  });
+  $("attach").addEventListener("click", () => $("file-input").click());
+  $("file-input").addEventListener("change", (e) => {
+    addPendingFiles(e.target.files);
+    e.target.value = ""; // allow re-picking the same file
+  });
+  const composer = $("composer");
+  composer.addEventListener("dragover", (e) => {
+    if (!e.dataTransfer?.types?.includes("Files")) return;
+    e.preventDefault();
+    composer.classList.add("dragover");
+  });
+  composer.addEventListener("dragleave", () => composer.classList.remove("dragover"));
+  composer.addEventListener("drop", (e) => {
+    composer.classList.remove("dragover");
+    if (!e.dataTransfer?.files?.length) return;
+    e.preventDefault();
+    addPendingFiles(e.dataTransfer.files);
   });
 
   // The panel outlives tab switches and navigations, so keep the header live.

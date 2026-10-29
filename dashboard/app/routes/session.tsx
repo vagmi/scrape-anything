@@ -1,11 +1,11 @@
-import { Download, ExternalLink, FolderOpen } from "lucide-react";
+import { Download, ExternalLink, FileText, FolderOpen } from "lucide-react";
 import { Link } from "react-router";
 import { StatusBadge } from "~/components/status-badge";
 import { Transcript } from "~/components/transcript";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent } from "~/components/ui/card";
 import { api, fmtTime } from "~/lib/api";
-import type { Artifact } from "~/lib/types";
+import type { Artifact, WorkspaceFile } from "~/lib/types";
 import type { Route } from "./+types/session";
 
 export async function clientLoader({ params }: Route.ClientLoaderArgs) {
@@ -16,11 +16,26 @@ export async function clientLoader({ params }: Route.ClientLoaderArgs) {
   } catch {
     artifact = null; // no artifact for this session yet
   }
-  return { session, artifact };
+  // Uploads and files the agent wrote in the sandbox (none for most sessions).
+  let files: WorkspaceFile[] = [];
+  try {
+    files = (await api.sessionFiles(params.id)).files;
+  } catch {
+    files = [];
+  }
+  return { session, artifact, files };
+}
+
+function formatSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
 export default function SessionRoute({ loaderData }: Route.ComponentProps) {
-  const { session, artifact } = loaderData;
+  const { session, artifact, files } = loaderData;
+  // session/artifact.json is backend-maintained context for the sandbox, not a deliverable.
+  const shownFiles = files.filter((f) => !f.path.startsWith("work/session/"));
 
   return (
     <div className="mx-auto max-w-3xl p-6">
@@ -59,6 +74,28 @@ export default function SessionRoute({ loaderData }: Route.ComponentProps) {
                 </a>
               </Button>
             </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {shownFiles.length > 0 && (
+        <Card className="mb-5">
+          <CardContent className="py-4">
+            <h2 className="mb-2 text-sm font-medium">Files</h2>
+            <ul className="flex flex-col gap-1">
+              {shownFiles.map((f) => (
+                <li key={f.path} className="flex items-center gap-2 text-xs">
+                  <FileText className="size-3.5 shrink-0 text-muted-foreground" />
+                  <a
+                    href={api.sessionFileUrl(session.session_id, f.path)}
+                    className="truncate font-mono hover:underline"
+                  >
+                    {f.path.replace(/^work\//, "")}
+                  </a>
+                  <span className="ml-auto shrink-0 text-muted-foreground">{formatSize(f.size)}</span>
+                </li>
+              ))}
+            </ul>
           </CardContent>
         </Card>
       )}

@@ -1,6 +1,7 @@
 import {
   Code2,
   Image as ImageIcon,
+  Paperclip,
   Terminal,
   User,
   Wrench,
@@ -29,6 +30,21 @@ export function Transcript({ turns }: { turns: Turn[] }) {
 
 function TurnView({ turn }: { turn: Turn }) {
   const { role, kind, payload } = turn;
+
+  if (role === "user" && kind === "attachment") {
+    const files: any[] = payload?.files ?? [];
+    return (
+      <Bubble icon={<Paperclip className="size-3.5" />} label="you · files" tone="user">
+        <ul className="flex flex-col gap-0.5">
+          {files.map((f, i) => (
+            <li key={f.path ?? i} className="font-mono text-xs">
+              {f.name ?? f.path} <span className="text-muted-foreground">({f.size} bytes)</span>
+            </li>
+          ))}
+        </ul>
+      </Bubble>
+    );
+  }
 
   if (role === "user" && kind === "message") {
     return (
@@ -89,7 +105,9 @@ function TurnView({ turn }: { turn: Turn }) {
 function ToolCallView({ call }: { call: any }) {
   const fnName = call?.fn_name ?? "";
   const args = call?.fn_arguments ?? {};
-  const code = typeof args?.code === "string" ? args.code : null;
+  // execute_script's `code` and run_command's `command` read better unescaped.
+  const codeKey = typeof args?.code === "string" ? "code" : typeof args?.command === "string" ? "command" : null;
+  const code: string | null = codeKey ? args[codeKey] : null;
   const argStr = code ?? (Object.keys(args).length ? JSON.stringify(args, null, 2) : "");
 
   return (
@@ -100,7 +118,7 @@ function ToolCallView({ call }: { call: any }) {
       {argStr && (
         <details className="mt-1">
           <summary className="cursor-pointer text-xs text-muted-foreground select-none">
-            {code ? "code" : "args"}
+            {codeKey ?? "args"}
           </summary>
           <pre className="mt-1 max-h-56 overflow-auto rounded-md bg-muted p-2 text-xs leading-relaxed whitespace-pre-wrap break-words">
             {argStr}
