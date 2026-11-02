@@ -592,9 +592,22 @@ async fn persist_assistant(db: &SqlitePool, session_id: &str, step: &agent::Step
     let stored_calls: Vec<Value> = step
         .tool_calls
         .iter()
-        .map(|c| json!({ "call_id": c.call_id, "fn_name": c.fn_name, "fn_arguments": c.fn_arguments }))
+        .map(|c| {
+            let mut call = json!({ "call_id": c.call_id, "fn_name": c.fn_name, "fn_arguments": c.fn_arguments });
+            if let Some(sigs) = &c.thought_signatures {
+                call["thought_signatures"] = json!(sigs);
+            }
+            call
+        })
         .collect();
-    let payload = json!({ "text": step.text, "tool_calls": stored_calls }).to_string();
+    let payload = json!({
+        "text": step.text,
+        "tool_calls": stored_calls,
+        "reasoning": step.reasoning,
+        "provider": step.provider,
+        "model": step.model,
+    })
+    .to_string();
     insert_turn(db, session_id, idx, "llm", "assistant", &payload).await?;
     Ok(idx)
 }

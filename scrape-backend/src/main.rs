@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     tracing::info!(path = %cfg.storage.path, "sqlite ready");
 
     let llm = llm::LlmClient::from_config(&cfg.llm)?;
-    tracing::info!(provider = %cfg.llm.provider, model = %cfg.llm.model, "llm client ready");
+    tracing::info!(providers = %llm.describe(), "llm client ready (failover in this order)");
 
     let sandbox = std::sync::Arc::new(sandbox::Sandbox::init(cfg.sandbox.clone()).await?);
     sandbox.spawn_reaper();

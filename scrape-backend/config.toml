@@ -6,9 +6,6 @@ port = 4546
 path = "./scrape.db"
 
 [llm]
-provider = "gemini"
-model = "gemini-3.8-flash"
-# GEMINI_API_KEY is read from the environment, not this file.
 # Max LLM steps per user request (resets on each follow-up message).
 max_turns = 100
 max_refinements = 3
@@ -18,6 +15,28 @@ request_timeout_secs = 60
 max_retries = 3
 retry_base_delay_ms = 1000
 retry_max_delay_ms = 8000
+# A provider that exhausted its retries (or kept answering with nothing) is
+# skipped for this long; steps go straight to the next provider meanwhile.
+failover_cooldown_secs = 300
+
+# Providers, in priority order. Each step goes to the first one that isn't
+# cooling down; if it stays down, rejects the request or returns an empty
+# answer, the next one takes over mid-session. API keys come from the
+# environment (default var per kind, or `api_key_env`); a provider whose key
+# isn't set is skipped at startup with a warning.
+#
+# kind: gemini | anthropic | openai | meta | deepseek | mistral | openrouter |
+#       xai | groq | ollama | openai_compatible (needs base_url)
+# reasoning_effort (optional): zero | minimal | low | medium | high | max
+[[llm.providers]]
+kind = "gemini"            # GEMINI_API_KEY
+model = "gemini-3.8-flash"
+reasoning_effort = "low"   # replaces the old disable-thinking genai fork
+
+[[llm.providers]]
+kind = "meta"              # META_API_KEY — Meta Model API (Muse Spark)
+model = "muse-spark-1.3-contributor-edition"
+
 
 [cors]
 allowed_origins = ["chrome-extension://*"]

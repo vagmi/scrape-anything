@@ -30,6 +30,15 @@ cd scrape-backend
 GEMINI_API_KEY=… cargo run
 ```
 
+The LLM providers are an ordered list in `config.toml` (`[[llm.providers]]`):
+Gemini first, then Anthropic and Meta (Muse Spark) as fallbacks. Others
+supported: OpenAI, DeepSeek, Mistral, OpenRouter, xAI, Groq, Ollama and any
+OpenAI-compatible server. Each step goes to the first provider that isn't cooling
+down. If that provider stays down, rejects the request or returns an empty
+answer, the next one takes over, even in the middle of a session. Keys come from
+the environment (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `META_API_KEY`, …), and a
+provider without one is skipped at startup.
+
 Listens on `http://localhost:4546`, serves the dashboard at
 `http://localhost:4546/` (build it first — see below), and creates `scrape.db`
 next to the binary on first run. Set `RUST_LOG=scrape_backend=debug` to see the

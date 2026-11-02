@@ -88,8 +88,14 @@ pub struct Storage {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Llm {
-    pub provider: String,
-    pub model: String,
+    /// Providers in priority order; see `crate::llm` for failover.
+    #[serde(default)]
+    pub providers: Vec<LlmProvider>,
+    /// Legacy single-provider form, used only when `providers` is empty.
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     pub max_turns: u32,
     pub max_refinements: u32,
     pub request_timeout_secs: u64,
@@ -101,11 +107,57 @@ pub struct Llm {
     pub retry_base_delay_ms: u64,
     #[serde(default = "default_retry_max_delay_ms")]
     pub retry_max_delay_ms: u64,
+    /// After a provider fails over, skip it for this long so later steps go
+    /// straight to the next one instead of waiting on it again.
+    #[serde(default = "default_failover_cooldown_secs")]
+    pub failover_cooldown_secs: u64,
+}
+
+/// One entry of `[[llm.providers]]`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmProvider {
+    /// gemini | anthropic | openai | meta | deepseek | mistral | openrouter |
+    /// xai | groq | ollama | openai_compatible
+    pub kind: String,
+    pub model: String,
+    /// Label for logs; defaults to `kind`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Env var holding the API key; defaults per kind (e.g. `ANTHROPIC_API_KEY`).
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    /// Override the endpoint (required for `openai_compatible`).
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// zero | minimal | low | medium | high | max — omit for the provider default.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+}
+
+impl Llm {
+    /// The configured providers, or the legacy `provider`/`model` pair as one.
+    pub fn provider_list(&self) -> Vec<LlmProvider> {
+        if !self.providers.is_empty() {
+            return self.providers.clone();
+        }
+        match (&self.provider, &self.model) {
+            (Some(kind), Some(model)) => vec![LlmProvider {
+                kind: kind.clone(),
+                model: model.clone(),
+                name: None,
+                api_key_env: None,
+                base_url: None,
+                reasoning_effort: None,
+            }],
+            _ => Vec::new(),
+        }
+    }
 }
 
 fn default_max_retries() -> u32 { 3 }
 fn default_retry_base_delay_ms() -> u64 { 1000 }
 fn default_retry_max_delay_ms() -> u64 { 8000 }
+fn default_failover_cooldown_secs() -> u64 { 300 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Cors {
